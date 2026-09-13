@@ -1,70 +1,57 @@
-# Kaggle Execution Guide: Phase 8 Feature Engineering & Phase 9 Model Exploration
+# Kaggle Execution Guide: Strategic Breakthrough to 0.946+
 
 **Competition:** Playground Series - Season 6, Episode 9 (`playground-series-s6e9`)  
 **Target:** `Will_Buy_EV` (Binary Classification)  
 **Evaluation Metric:** `ROC-AUC`  
-**Current Baseline Score:** 0.94168 (LightGBM Raw Features)  
-**Target Score:** 0.9467+ (Ensemble of LightGBM + CatBoost + XGBoost with Domain Features)
+**Current Baseline Score:** 0.94168  
+**Target Score:** **0.9467+**
 
 ---
 
-## 1. Setup in Kaggle Notebook (Dual T4 GPU Recommended)
+## The 3 Breakthrough Techniques Included in this Update
 
-In the Kaggle Notebook right sidebar:
-1. **Accelerator:** Set to **GPU T4 x2** (or GPU P100).
-2. **Internet:** Turn **ON** (needed for `git pull` from GitHub).
-3. **Data:** Ensure `playground-series-s6e9` is attached under **Input**.
+1. **Ground-Truth Physical Dataset Ingestion:**  
+   The underlying real-world dataset (`itzzomkar/ev-adoption-behavior-and-range-anxiety`) with 10,000 samples is bundled directly in `data/original/` and injected strictly into each training fold.
+2. **Bayesian Target Encoding with M-Estimate Smoothing ($m=25.0$):**  
+   Encodes high-order consumer compound tuples (`City x Car`, `Car x Subsidy`, `City x Subsidy`, `City x Car x Subsidy`) inside the CV loop.
+3. **Orthogonal Model Diversity:**  
+   Ensembles **LightGBM + CatBoost + XGBoost + PyTorch Tabular Neural Network** (with learned Entity Embeddings and residual GELU layers).
 
-In the first cell, pull the latest code:
+---
 
+## Kaggle Notebook Execution (Dual T4 GPU Recommended)
+
+### Step 1: Pull the Latest Repository
 ```python
-%cd /kaggle/working
-!git clone https://github.com/tuboa2/electric-vehicle-purchase-predictor.git electric-vehicle 2>/dev/null || (cd electric-vehicle && git pull origin main)
 %cd /kaggle/working/electric-vehicle
+!git pull origin main
 ```
 
----
-
-## 2. Phase 8 & 9: Train Diverse Models with Domain Features
-
-Each command trains a 5-fold cross-validated model, automatically extracts the domain feature interactions (charging density, commute ratios, economic capacity, and subsidy gating), detects GPU acceleration, and saves predictions to `/kaggle/working/models/<model_name>/`.
-
-### Model 1: LightGBM (Leaf-wise Tree Growth)
+### Step 2: Train Model 1 (LightGBM + Original Dataset + Target Encoding)
 ```bash
-!python scripts/kaggle_train.py --model lgbm --features domain
+!python scripts/kaggle_train.py --model lgbm --features domain --use-original
 ```
 
-### Model 2: CatBoost (Symmetric Oblivious Trees + GPU + Native Categoricals)
+### Step 3: Train Model 2 (CatBoost GPU + Original Dataset)
 ```bash
-!python scripts/kaggle_train.py --model catboost --features domain
+!python scripts/kaggle_train.py --model catboost --features domain --use-original
 ```
 
-### Model 3: XGBoost (Histogram-based Depth-wise GBDT + CUDA)
+### Step 4: Train Model 3 (XGBoost CUDA + Original Dataset)
 ```bash
-!python scripts/kaggle_train.py --model xgboost --features domain
+!python scripts/kaggle_train.py --model xgboost --features domain --use-original
 ```
 
----
+### Step 5: Train Model 4 (PyTorch Tabular Neural Network on GPU)
+```bash
+!python scripts/kaggle_train_nn.py --epochs 12 --batch-size 2048
+```
 
-## 3. Phase 10: Run the Blending & Ensembling Engine
-
-Once you have trained at least 2 models, run the automated blender:
-
+### Step 6: Execute the Multi-Model Blender
 ```bash
 !python scripts/kaggle_blend.py
 ```
 
-### What the Blender Does:
-1. Scans all candidate models in `/kaggle/working/models/`.
-2. Computes the out-of-fold prediction correlation matrix.
-3. Evaluates **Strategy A** (Percentile Rank Averaging) and **Strategy B** (Nelder-Mead Metric Optimization on ROC-AUC).
-4. Selects the highest CV ensemble and validates Gate 5 ($\Delta \text{CV} > 0.0005$).
-5. Automatically writes the final ensemble predictions directly to `/kaggle/working/submission.csv`!
-
----
-
-## 4. Submitting to Kaggle
-
-On the right panel under **Data $\to$ Output**:
-- The file `/kaggle/working/submission.csv` is generated and certified (286,571 rows, 0 nulls, correct headers).
-- Click the **Submit** button next to `submission.csv` to submit directly to the leaderboard!
+### Step 7: Submit to Kaggle
+- The ensemble blender automatically writes the verified final predictions to `/kaggle/working/submission.csv`.
+- On the right panel under **Data $\to$ Output**, click **Submit** next to `submission.csv`.

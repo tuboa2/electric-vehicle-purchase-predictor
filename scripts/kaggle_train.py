@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
 Kaggle Notebook Multi-Model Training & Prediction Runner for playground-series-s6e9.
-Supports Phase 8 (Feature Engineering) & Phase 9 (Diverse Model Exploration):
+Supports Phase 8, 9, 10:
 - LightGBM (leaf-wise GBDT)
 - CatBoost (symmetric oblivious trees with native categorical handling & GPU support)
 - XGBoost (histogram-based depth-wise GBDT with GPU support)
+- Ground-Truth Original Dataset Augmentation (10,000 samples injected into train folds)
+- Fold-Isolated Bayesian Target Encoding with M-Estimate Smoothing
 
 Usage in Kaggle notebook:
-    !python scripts/kaggle_train.py --model lgbm --features domain
-    !python scripts/kaggle_train.py --model catboost --features domain
-    !python scripts/kaggle_train.py --model xgboost --features domain
+    !python scripts/kaggle_train.py --model lgbm --features domain --use-original
+    !python scripts/kaggle_train.py --model catboost --features domain --use-original
+    !python scripts/kaggle_train.py --model xgboost --features domain --use-original
 """
 
 import argparse
@@ -32,6 +34,7 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 
 from features.domain_features import generate_domain_features
+from features.target_encoding import OutOfFoldTargetEncoder
 from kaggle.paths import resolve_data_dir, resolve_output_dir
 
 
@@ -49,6 +52,30 @@ def detect_gpu() -> bool:
         return True
     print("[-] No GPU detected. Running on CPU.")
     return False
+
+
+def load_original_data() -> pd.DataFrame | None:
+    """Loads the original 10,000-sample seed dataset if available."""
+    candidates = [
+        Path("data/original/EV_Adoption_and_Range_Anxiety_Dataset.csv"),
+        PROJECT_ROOT / "data/original/EV_Adoption_and_Range_Anxiety_Dataset.csv",
+        Path("/kaggle/working/electric-vehicle/data/original/EV_Adoption_and_Range_Anxiety_Dataset.csv"),
+        Path("/kaggle/input/ev-adoption-behavior-and-range-anxiety/EV_Adoption_and_Range_Anxiety_Dataset.csv"),
+    ]
+    if Path("/kaggle/input").exists():
+        for f in Path("/kaggle/input").rglob("*EV_Adoption*.csv"):
+            candidates.insert(0, f)
+
+    for p in candidates:
+        if p.exists():
+            df = pd.read_csv(p)
+            print(f"[+] Ground-Truth Original Dataset loaded from: {p} ({len(df)} samples)")
+            if "Buyer_ID" in df.columns:
+                df["id"] = -1 - np.arange(len(df))
+                df.drop(columns=["Buyer_ID"], inplace=True)
+            df["is_original"] = 1
+            return df
+    return None
 
 
 def load_data(data_dir: Path | str | None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, Path]:
@@ -79,6 +106,9 @@ def load_data(data_dir: Path | str | None) -> tuple[pd.DataFrame, pd.DataFrame, 
     elif (resolved_dir / "sample_submission.csv").exists():
         sample_df = pd.read_csv(resolved_dir / "sample_submission.csv")
 
+    train_df["is_original"] = 0
+    test_df["is_original"] = 0
+
     print(f"[+] Loaded train: {train_df.shape}, test: {test_df.shape}")
     return train_df, test_df, sample_df, resolved_dir
 
@@ -104,9 +134,9 @@ def get_or_create_folds(train_df: pd.DataFrame, data_dir: Path, n_splits: int = 
 def train_lgbm(X_tr, y_tr, X_va, y_va, X_te, cat_cols, seed, fold):
     import lightgbm as lgb
     model = lgb.LGBMClassifier(
-        n_estimators=1200,
-        learning_rate=0.04,
-        num_leaves=31,
+        n_estimators=1400,
+        learning_rate=0.035,
+        num_leaves=35,
         max_depth=6,
         subsample=0.8,
         colsample_bytree=0.8,
@@ -129,8 +159,8 @@ def train_catboost(X_tr, y_tr, X_va, y_va, X_te, cat_cols, seed, fold, use_gpu):
     from catboost import CatBoostClassifier
     task_type = "GPU" if use_gpu else "CPU"
     model = CatBoostClassifier(
-        iterations=1500,
-        learning_rate=0.04,
+        iterations=1600,
+        learning_rate=0.035,
         depth=6,
         l2_leaf_reg=5.0,
         random_seed=seed + fold,
@@ -148,11 +178,10 @@ def train_catboost(X_tr, y_tr, X_va, y_va, X_te, cat_cols, seed, fold, use_gpu):
 
 def train_xgboost(X_tr, y_tr, X_va, y_va, X_te, cat_cols, seed, fold, use_gpu):
     import xgboost as xgb
-    # For XGBoost, convert categoricals to pandas category dtype or enable categorical support
     device = "cuda" if use_gpu else "cpu"
     model = xgb.XGBClassifier(
-        n_estimators=1200,
-        learning_rate=0.04,
+        n_estimators=1400,
+        learning_rate=0.035,
         max_depth=6,
         subsample=0.8,
         colsample_bytree=0.8,
@@ -173,6 +202,8 @@ def train_xgboost(X_tr, y_tr, X_va, y_va, X_te, cat_cols, seed, fold, use_gpu):
 def train_and_predict(
     model_name: str = "lgbm",
     features_type: str = "domain",
+    use_original: bool = True,
+    use_target_encoding: bool = True,
     data_dir: Path | None = None,
     output_dir: Path | None = None,
     n_splits: int = 5,
@@ -182,8 +213,9 @@ def train_and_predict(
     has_gpu = detect_gpu()
 
     # Destination output directory
+    run_tag = f"{model_name}_{features_type}{'_orig' if use_original else ''}"
     base_out = output_dir if output_dir else resolve_output_dir()
-    model_dir = base_out / "models" / f"{model_name}_{features_type}"
+    model_dir = base_out / "models" / run_tag
     model_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Load Data
@@ -191,15 +223,20 @@ def train_and_predict(
     target_col = "Will_Buy_EV"
     id_col = "id"
 
-    # 2. Feature Engineering
+    # 2. Check and Prepare Original Data
+    orig_df = load_original_data() if use_original else None
+
+    # 3. Feature Engineering
     if features_type == "domain":
-        print("[*] Applying Domain Feature Transformations (Hypothesis 1)...")
+        print("[*] Applying Domain Feature Transformations...")
         train_df, test_df, new_cols = generate_domain_features(train_df, test_df)
+        if orig_df is not None:
+            orig_df, _, _ = generate_domain_features(orig_df, orig_df.copy())
         print(f"[+] Injected {len(new_cols)} engineered features: {new_cols}")
     else:
-        print("[*] Using Raw Features (Baseline mode).")
+        print("[*] Using Raw Features.")
 
-    features = [c for c in test_df.columns if c != id_col]
+    features = [c for c in test_df.columns if c not in [id_col, "is_original"]]
     train_df["fold"] = get_or_create_folds(train_df, resolved_data_dir, n_splits=n_splits, seed=seed)
 
     # Convert categoricals
@@ -210,12 +247,17 @@ def train_and_predict(
         for c in cat_cols:
             train_df[c] = train_df[c].astype("category")
             test_df[c] = test_df[c].astype("category")
+            if orig_df is not None:
+                orig_df[c] = orig_df[c].astype("category")
     elif model_name == "catboost":
         for c in cat_cols:
             train_df[c] = train_df[c].astype(str)
             test_df[c] = test_df[c].astype(str)
+            if orig_df is not None:
+                orig_df[c] = orig_df[c].astype(str)
 
     y_train = (train_df[target_col] == "Yes").to_numpy().astype(int)
+    y_orig = (orig_df[target_col] == "Yes").to_numpy().astype(int) if orig_df is not None else None
 
     oof_preds = np.zeros(len(train_df), dtype=np.float64)
     test_preds = np.zeros(len(test_df), dtype=np.float64)
@@ -223,31 +265,58 @@ def train_and_predict(
     feature_importances = np.zeros(len(features), dtype=np.float64)
 
     print("=" * 65)
-    print(f"[*] TRAINING {n_splits}-FOLD {model_name.upper()} ({features_type.upper()} FEATURES)")
+    print(f"[*] TRAINING {n_splits}-FOLD {model_name.upper()} ({run_tag.upper()})")
+    print(f"    Original Dataset Augmentation: {'ENABLED (10k samples)' if orig_df is not None else 'DISABLED'}")
     print(f"    Accelerator: {'GPU' if has_gpu and model_name in ['catboost', 'xgboost'] else 'CPU'}")
     print("=" * 65)
+
+    te_compound_cols = [c for c in ["feat_city_car", "feat_car_subsidy", "feat_city_subsidy", "feat_city_car_subsidy"] if c in features]
 
     for fold in range(n_splits):
         f_start = time.time()
         tr_mask = train_df["fold"] != fold
         va_mask = train_df["fold"] == fold
 
-        X_tr, y_tr = train_df.loc[tr_mask, features], y_train[tr_mask]
-        X_va, y_va = train_df.loc[va_mask, features], y_train[va_mask]
-        X_te = test_df[features]
+        X_tr = train_df.loc[tr_mask, features].copy()
+        y_tr = y_train[tr_mask].copy()
+
+        X_va = train_df.loc[va_mask, features].copy()
+        y_va = y_train[va_mask].copy()
+
+        X_te = test_df[features].copy()
+
+        # Fold-Isolated Target Encoding
+        if use_target_encoding and te_compound_cols and model_name in ["lgbm", "xgboost"]:
+            te_encoder = OutOfFoldTargetEncoder(target_col=target_col, m_smoothing=25.0)
+            X_tr, X_va, _ = te_encoder.fit_transform_fold(X_tr, X_va, te_compound_cols, y_tr)
+            X_te, _ = te_encoder.transform_test(X_te, te_compound_cols)
+
+        # Inject Original Ground-Truth Data STRICTLY into Training Slice
+        if orig_df is not None:
+            X_orig = orig_df[features].copy()
+            if use_target_encoding and te_compound_cols and model_name in ["lgbm", "xgboost"]:
+                X_orig, _ = te_encoder.transform_test(X_orig, te_compound_cols)
+
+            X_tr = pd.concat([X_tr, X_orig], axis=0, ignore_index=True)
+            y_tr = np.concatenate([y_tr, y_orig])
+
+        # Current feature list for fold (including any TE cols)
+        fold_features = list(X_tr.columns)
+        fold_cat_cols = [c for c in fold_features if not pd.api.types.is_numeric_dtype(X_tr[c])]
 
         if model_name == "lgbm":
-            v_prob, t_prob, imp = train_lgbm(X_tr, y_tr, X_va, y_va, X_te, cat_cols, seed, fold)
+            v_prob, t_prob, imp = train_lgbm(X_tr, y_tr, X_va, y_va, X_te, fold_cat_cols, seed, fold)
         elif model_name == "catboost":
-            v_prob, t_prob, imp = train_catboost(X_tr, y_tr, X_va, y_va, X_te, cat_cols, seed, fold, has_gpu)
+            v_prob, t_prob, imp = train_catboost(X_tr, y_tr, X_va, y_va, X_te, fold_cat_cols, seed, fold, has_gpu)
         elif model_name == "xgboost":
-            v_prob, t_prob, imp = train_xgboost(X_tr, y_tr, X_va, y_va, X_te, cat_cols, seed, fold, has_gpu)
+            v_prob, t_prob, imp = train_xgboost(X_tr, y_tr, X_va, y_va, X_te, fold_cat_cols, seed, fold, has_gpu)
         else:
-            raise ValueError(f"Unknown model: {model_name}. Supported: lgbm, catboost, xgboost")
+            raise ValueError(f"Unknown model: {model_name}")
 
         oof_preds[va_mask] = v_prob
         test_preds += t_prob / n_splits
-        feature_importances += imp / n_splits
+        if len(imp) == len(feature_importances):
+            feature_importances += imp / n_splits
 
         fold_auc = roc_auc_score(y_va, v_prob)
         fold_scores.append(fold_auc)
@@ -263,7 +332,7 @@ def train_and_predict(
     print(f"[+] Training duration: {total_time:.1f}s ({total_time / 60:.2f} min)")
     print("=" * 65)
 
-    # 1. Write Submission File to model_dir AND /kaggle/working/submission.csv
+    # 1. Write Submission File
     sub_df = pd.DataFrame({
         id_col: test_df[id_col],
         target_col: test_preds,
@@ -271,7 +340,7 @@ def train_and_predict(
     sub_path = model_dir / "submission.csv"
     sub_df.to_csv(sub_path, index=False)
 
-    # Always ensure root /kaggle/working/submission.csv has the latest submission for 1-click UI
+    # Primary submission file
     root_sub = Path("/kaggle/working/submission.csv") if Path("/kaggle/working").exists() else base_out / "submission.csv"
     sub_df.to_csv(root_sub, index=False)
     print(f"[+] Updated primary submission file: {root_sub}")
@@ -296,19 +365,16 @@ def train_and_predict(
         "competition_id": "playground-series-s6e9",
         "model_name": model_name,
         "features_type": features_type,
+        "use_original": use_original,
         "metric_name": "roc_auc",
         "overall_cv": float(overall_auc),
         "std_cv": float(std_auc),
         "fold_scores": [float(s) for s in fold_scores],
-        "n_samples_train": len(train_df),
-        "n_samples_test": len(test_df),
-        "features": features,
         "execution_time_seconds": total_time,
     }
     with open(model_dir / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(metrics_summary, f, indent=2)
 
-    # 4. Write Feature Importances
     feat_imp_dict = {f: float(imp) for f, imp in sorted(zip(features, feature_importances), key=lambda x: x[1], reverse=True)}
     with open(model_dir / "feature_importance.json", "w", encoding="utf-8") as f:
         json.dump(feat_imp_dict, f, indent=2)
@@ -318,22 +384,28 @@ def train_and_predict(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Phase 8/9 Multi-Model Trainer for playground-series-s6e9")
+    parser = argparse.ArgumentParser(description="Phase 8/9 Strategic Multi-Model Runner")
     parser.add_argument("--model", type=str, default="lgbm", choices=["lgbm", "catboost", "xgboost"],
                         help="Model architecture to train (lgbm, catboost, xgboost)")
     parser.add_argument("--features", type=str, default="domain", choices=["domain", "raw"],
                         help="Feature set: 'domain' (engineered interactions) or 'raw'")
-    parser.add_argument("--data-dir", type=Path, default=None,
-                        help="Optional explicit path to dataset")
-    parser.add_argument("--output-dir", type=Path, default=None,
-                        help="Optional explicit output directory")
-    parser.add_argument("--splits", type=int, default=5, help="Number of folds (default: 5)")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
+    parser.add_argument("--use-original", action="store_true", default=True,
+                        help="Inject original 10,000-sample seed dataset into training folds")
+    parser.add_argument("--no-original", dest="use_original", action="store_false",
+                        help="Disable original dataset injection")
+    parser.add_argument("--target-encoding", action="store_true", default=True,
+                        help="Apply fold-isolated Bayesian target encoding")
+    parser.add_argument("--data-dir", type=Path, default=None)
+    parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--splits", type=int, default=5)
+    parser.add_argument("--seed", type=int, default=42)
 
     args = parser.parse_args()
     train_and_predict(
         model_name=args.model,
         features_type=args.features,
+        use_original=args.use_original,
+        use_target_encoding=args.target_encoding,
         data_dir=args.data_dir,
         output_dir=args.output_dir,
         n_splits=args.splits,
