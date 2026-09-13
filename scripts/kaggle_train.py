@@ -188,7 +188,7 @@ def train_and_predict(
     assert (sub_df["Will_Buy_EV"] >= 0.0).all() and (sub_df["Will_Buy_EV"] <= 1.0).all(), "Predictions out of [0, 1] bounds!"
     print("[+] Submission verification PASSED: 0 nulls, correct headers, valid probability bounds.")
 
-    # 2. Write OOF Predictions
+    # 2. Write OOF Predictions & Test Predictions
     oof_out = resolved_out / "oof_preds.parquet"
     pl.DataFrame({
         id_col: train_df[id_col],
@@ -196,6 +196,13 @@ def train_and_predict(
         target_col: train_df[target_col],
         "fold": train_df["fold"],
     }).write_parquet(oof_out, compression="zstd")
+
+    test_out = resolved_out / "test_preds.parquet"
+    pl.DataFrame({
+        id_col: test_df[id_col],
+        "pred": test_preds,
+    }).write_parquet(test_out, compression="zstd")
+    print(f"[+] Test predictions written to: {test_out}")
 
     # 3. Write Metrics Summary
     metrics_summary = {
