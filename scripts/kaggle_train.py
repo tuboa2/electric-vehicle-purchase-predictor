@@ -31,35 +31,36 @@ from evaluation.metrics import MetricRegistry
 from kaggle.paths import resolve_data_dir, resolve_output_dir
 
 
-def load_data(data_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
-    """Loads train, test, and sample submission from Parquet or CSV."""
-    print(f"[*] Ingesting data from: {data_dir}")
+def load_data(data_dir: Path | str | None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, Path]:
+    """Loads train, test, and sample submission from Parquet or CSV with auto-discovery."""
+    resolved_dir = resolve_data_dir(data_dir)
+    print(f"[*] Ingesting data from: {resolved_dir}")
 
     # Load Train
-    if (data_dir / "train.parquet").exists():
-        train_df = pl.read_parquet(data_dir / "train.parquet").to_pandas()
-    elif (data_dir / "train.csv").exists():
-        train_df = pl.read_csv(data_dir / "train.csv").to_pandas()
+    if (resolved_dir / "train.parquet").exists():
+        train_df = pl.read_parquet(resolved_dir / "train.parquet").to_pandas()
+    elif (resolved_dir / "train.csv").exists():
+        train_df = pl.read_csv(resolved_dir / "train.csv").to_pandas()
     else:
-        raise FileNotFoundError(f"Neither train.parquet nor train.csv found in {data_dir}")
+        raise FileNotFoundError(f"Neither train.parquet nor train.csv found in {resolved_dir}")
 
     # Load Test
-    if (data_dir / "test.parquet").exists():
-        test_df = pl.read_parquet(data_dir / "test.parquet").to_pandas()
-    elif (data_dir / "test.csv").exists():
-        test_df = pl.read_csv(data_dir / "test.csv").to_pandas()
+    if (resolved_dir / "test.parquet").exists():
+        test_df = pl.read_parquet(resolved_dir / "test.parquet").to_pandas()
+    elif (resolved_dir / "test.csv").exists():
+        test_df = pl.read_csv(resolved_dir / "test.csv").to_pandas()
     else:
-        raise FileNotFoundError(f"Neither test.parquet nor test.csv found in {data_dir}")
+        raise FileNotFoundError(f"Neither test.parquet nor test.csv found in {resolved_dir}")
 
     # Load Sample Submission (optional reference)
     sample_df = None
-    if (data_dir / "sample_submission.parquet").exists():
-        sample_df = pl.read_parquet(data_dir / "sample_submission.parquet").to_pandas()
-    elif (data_dir / "sample_submission.csv").exists():
-        sample_df = pd.read_csv(data_dir / "sample_submission.csv")
+    if (resolved_dir / "sample_submission.parquet").exists():
+        sample_df = pl.read_parquet(resolved_dir / "sample_submission.parquet").to_pandas()
+    elif (resolved_dir / "sample_submission.csv").exists():
+        sample_df = pd.read_csv(resolved_dir / "sample_submission.csv")
 
     print(f"[+] Loaded train: {train_df.shape}, test: {test_df.shape}")
-    return train_df, test_df, sample_df
+    return train_df, test_df, sample_df, resolved_dir
 
 
 def get_or_create_folds(train_df: pd.DataFrame, data_dir: Path, n_splits: int = 5, seed: int = 42) -> np.ndarray:
@@ -84,23 +85,24 @@ def get_or_create_folds(train_df: pd.DataFrame, data_dir: Path, n_splits: int = 
 
 
 def train_and_predict(
-    data_dir: Path,
-    output_dir: Path,
+    data_dir: Path | None = None,
+    output_dir: Path | None = None,
     n_splits: int = 5,
     seed: int = 42,
     num_leaves: int = 31,
     learning_rate: float = 0.05,
     n_estimators: int = 1000,
 ) -> dict:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    train_df, test_df, sample_df = load_data(data_dir)
+    resolved_out = output_dir if output_dir else resolve_output_dir()
+    resolved_out.mkdir(parents=True, exist_ok=True)
+    train_df, test_df, sample_df, resolved_data_dir = load_data(data_dir)
 
     target_col = "Will_Buy_EV"
     id_col = "id"
     features = [c for c in test_df.columns if c != id_col]
 
     # Assign folds
-    train_df["fold"] = get_or_create_folds(train_df, data_dir, n_splits=n_splits, seed=seed)
+    train_df["fold"] = get_or_create_folds(train_df, resolved_data_dir, n_splits=n_splits, seed=seed)
 
     # Convert categoricals to pandas category dtype for LightGBM
     cat_cols = [c for c in features if not pd.api.types.is_numeric_dtype(train_df[c])]
@@ -163,13 +165,21 @@ def train_and_predict(
     print("=" * 60)
 
     # 1. Write Submission File (Gate 6 Strict Compliance)
-    sub_path = output_dir / "submission.csv"
+    sub_path = resolved_out / "submission.csv"
     sub_df = pd.DataFrame({
         id_col: test_df[id_col],
         target_col: test_preds,
     })
     sub_df.to_csv(sub_path, index=False)
     print(f"[+] Submission file written to: {sub_path} ({sub_path.stat().st_size / 1024 / 1024:.2f} MB)")
+
+    # In Kaggle notebooks, also ensure /kaggle/working/submission.csv is directly accessible
+    if Path("/kaggle/working").exists() and sub_path != Path("/kaggle/working/submission.csv"):
+        try:
+            sub_df.to_csv("/kaggle/working/submission.csv", index=False)
+            print("[+] Also mirrored submission directly to /kaggle/working/submission.csv")
+        except Exception:
+            pass
 
     # Validate Submission
     assert len(sub_df) == len(test_df), f"Row count mismatch: {len(sub_df)} vs {len(test_df)}"
@@ -179,7 +189,7 @@ def train_and_predict(
     print("[+] Submission verification PASSED: 0 nulls, correct headers, valid probability bounds.")
 
     # 2. Write OOF Predictions
-    oof_out = output_dir / "oof_preds.parquet"
+    oof_out = resolved_out / "oof_preds.parquet"
     pl.DataFrame({
         id_col: train_df[id_col],
         "pred": oof_preds,
@@ -197,15 +207,15 @@ def train_and_predict(
         "n_samples_train": len(train_df),
         "n_samples_test": len(test_df),
     }
-    with open(output_dir / "metrics.json", "w", encoding="utf-8") as f:
+    with open(resolved_out / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(metrics_summary, f, indent=2)
 
     # 4. Write Feature Importances
     feat_imp_dict = {f: float(imp) for f, imp in sorted(zip(features, feature_importances), key=lambda x: x[1], reverse=True)}
-    with open(output_dir / "feature_importance.json", "w", encoding="utf-8") as f:
+    with open(resolved_out / "feature_importance.json", "w", encoding="utf-8") as f:
         json.dump(feat_imp_dict, f, indent=2)
 
-    print(f"[+] All artifacts successfully generated in: {output_dir}")
+    print(f"[+] All artifacts successfully generated in: {resolved_out}")
     return metrics_summary
 
 
