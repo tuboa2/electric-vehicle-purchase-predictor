@@ -307,8 +307,10 @@ def blend_grandmaster_models(
     output_dir: Path,
     primary_sub_path: Path,
 ):
+    from scipy.stats import rankdata
+
     print(f"\n======================================================================")
-    print(f"[*] EXECUTING GRANDMASTER OPTIMIZED BLEND")
+    print(f"[*] EXECUTING GRANDMASTER DUAL OPTIMIZED BLEND (PROBABILITY + RANK)")
     print(f"======================================================================")
     model_names = list(models_oof.keys())
     m = len(model_names)
@@ -319,8 +321,12 @@ def blend_grandmaster_models(
     oof_matrix = np.column_stack([models_oof[k] for k in model_names])
     test_matrix = np.column_stack([models_test[k] for k in model_names])
 
-    # Objective: Minimize negative ROC-AUC with Nelder-Mead
-    def loss_func(weights):
+    # Rank-normalized matrices (percentile ranks scaled to [0, 1])
+    oof_rank_matrix = np.column_stack([rankdata(models_oof[k]) / len(y_true) for k in model_names])
+    test_rank_matrix = np.column_stack([rankdata(models_test[k]) / len(test_ids) for k in model_names])
+
+    # Method 1: Probability Space Nelder-Mead
+    def loss_prob(weights):
         w = np.array(weights)
         if np.sum(np.abs(w)) == 0:
             return 0.0
@@ -329,27 +335,64 @@ def blend_grandmaster_models(
         return -roc_auc_score(y_true, blend)
 
     init_w = np.ones(m) / m
-    res = minimize(
-        loss_func,
+    res_prob = minimize(
+        loss_prob,
         init_w,
         method="Nelder-Mead",
         bounds=[(0.0, 1.0)] * m,
         options={"maxiter": 500, "disp": False},
     )
-    raw_w = np.clip(res.x, 0.0, None)
-    best_weights = raw_w / np.sum(raw_w)
-    weights_dict = {model_names[i]: float(best_weights[i]) for i in range(m)}
+    raw_w_prob = np.clip(res_prob.x, 0.0, None)
+    best_w_prob = raw_w_prob / np.sum(raw_w_prob)
+    blend_oof_prob = np.dot(oof_matrix, best_w_prob)
+    auc_prob = roc_auc_score(y_true, blend_oof_prob)
 
-    blend_oof = np.dot(oof_matrix, best_weights)
-    blend_test = np.dot(test_matrix, best_weights)
-    blend_auc = roc_auc_score(y_true, blend_oof)
+    # Method 2: Rank Space Nelder-Mead
+    def loss_rank(weights):
+        w = np.array(weights)
+        if np.sum(np.abs(w)) == 0:
+            return 0.0
+        w = w / np.sum(w)
+        blend = np.dot(oof_rank_matrix, w)
+        return -roc_auc_score(y_true, blend)
+
+    res_rank = minimize(
+        loss_rank,
+        init_w,
+        method="Nelder-Mead",
+        bounds=[(0.0, 1.0)] * m,
+        options={"maxiter": 500, "disp": False},
+    )
+    raw_w_rank = np.clip(res_rank.x, 0.0, None)
+    best_w_rank = raw_w_rank / np.sum(raw_w_rank)
+    blend_oof_rank = np.dot(oof_rank_matrix, best_w_rank)
+    auc_rank = roc_auc_score(y_true, blend_oof_rank)
 
     best_single_auc = max(roc_auc_score(y_true, models_oof[k]) for k in model_names)
-    delta_auc = blend_auc - best_single_auc
 
-    print(f"[+] Optimal Blend Weights: {weights_dict}")
+    if auc_rank > auc_prob:
+        chosen_method = "rank_space_nelder_mead"
+        best_weights = best_w_rank
+        blend_oof = blend_oof_rank
+        blend_test = np.dot(test_rank_matrix, best_w_rank)
+        final_auc = auc_rank
+    else:
+        chosen_method = "prob_space_nelder_mead"
+        best_weights = best_w_prob
+        blend_oof = blend_oof_prob
+        blend_test = np.dot(test_matrix, best_w_prob)
+        final_auc = auc_prob
+
+    weights_dict = {model_names[i]: float(best_weights[i]) for i in range(m)}
+    delta_auc = final_auc - best_single_auc
+
+    print(f"[+] Method Comparison:")
+    print(f"    - Probability Blend AUC: {auc_prob:.6f}")
+    print(f"    - Rank-Weighted Blend AUC: {auc_rank:.6f}")
+    print(f"[+] Chosen Strategy:        {chosen_method.upper()}")
+    print(f"[+] Optimal Blend Weights:  {weights_dict}")
     print(f"[+] Best Single Model AUC:  {best_single_auc:.6f}")
-    print(f"[+] Ensembled Grandmaster:  {blend_auc:.6f} (Δ: {delta_auc:+.6f})")
+    print(f"[+] Ensembled Grandmaster:  {final_auc:.6f} (Δ: {delta_auc:+.6f})")
 
     # Save ensemble artifacts
     ensemble_dir = output_dir.parent / "ensemble_grandmaster"
@@ -360,11 +403,11 @@ def blend_grandmaster_models(
     blend_sub.to_csv(primary_sub_path, index=False)
 
     meta = {
-        "ensemble_type": "grandmaster_nelder_mead",
+        "ensemble_type": chosen_method,
         "models": model_names,
         "weights": weights_dict,
         "best_single_auc": float(best_single_auc),
-        "ensemble_auc": float(blend_auc),
+        "ensemble_auc": float(final_auc),
         "delta_auc": float(delta_auc),
     }
     with open(ensemble_dir / "metrics.json", "w", encoding="utf-8") as f:
@@ -377,7 +420,8 @@ def main():
     parser = argparse.ArgumentParser(description="Grandmaster EV Purchase Training")
     parser.add_argument("--model", type=str, choices=["lgbm", "catboost", "xgboost", "all"], default="lgbm")
     parser.add_argument("--folds", type=int, default=5)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=42, help="Primary random seed")
+    parser.add_argument("--seeds", nargs="+", type=int, default=None, help="List of seeds for multi-seed averaging (e.g. --seeds 42 2024 777)")
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--sub-path", type=str, default=None)
     args = parser.parse_args()
@@ -400,26 +444,41 @@ def main():
     train_feat, test_feat, features, te_cols = build_grandmaster_features(train_df, test_df, orig_df)
     print(f"[+] Feature generation complete. Total features: {len(features)} | Target-encode cols: {len(te_cols)}")
 
+    seeds = args.seeds if args.seeds else [args.seed]
+    models_to_run = ["lgbm", "catboost", "xgboost"] if args.model == "all" else [args.model]
+
     models_oof: Dict[str, np.ndarray] = {}
     models_test: Dict[str, np.ndarray] = {}
 
-    models_to_run = ["lgbm", "catboost", "xgboost"] if args.model == "all" else [args.model]
-
     for m in models_to_run:
-        auc, oof, test_p = train_single_model(
-            model_type=m,
-            train_feat=train_feat,
-            test_feat=test_feat,
-            features=features,
-            te_cols=te_cols,
-            n_splits=args.folds,
-            seed=args.seed,
-            has_gpu=has_gpu,
-            output_dir=output_dir,
-            primary_sub_path=sub_path,
-        )
-        models_oof[m] = oof
-        models_test[m] = test_p
+        seed_oofs = []
+        seed_tests = []
+        for s in seeds:
+            print(f"\n>>> Running {m.upper()} with Seed {s} ({len(seed_oofs)+1}/{len(seeds)})")
+            auc, oof, test_p = train_single_model(
+                model_type=m,
+                train_feat=train_feat,
+                test_feat=test_feat,
+                features=features,
+                te_cols=te_cols,
+                n_splits=args.folds,
+                seed=s,
+                has_gpu=has_gpu,
+                output_dir=output_dir,
+                primary_sub_path=sub_path,
+            )
+            seed_oofs.append(oof)
+            seed_tests.append(test_p)
+
+        avg_oof = np.mean(seed_oofs, axis=0)
+        avg_test = np.mean(seed_tests, axis=0)
+        avg_auc = roc_auc_score(train_feat[TARGET].values, avg_oof)
+
+        if len(seeds) > 1:
+            print(f"\n[+] {m.upper()} Multi-Seed Average OOF ROC-AUC ({len(seeds)} seeds): {avg_auc:.6f}")
+
+        models_oof[m] = avg_oof
+        models_test[m] = avg_test
 
     if len(models_to_run) > 1:
         blend_grandmaster_models(
