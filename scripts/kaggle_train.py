@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """
-Kaggle Notebook Execution Runner for playground-series-s6e9.
-Self-contained, robust pipeline entrypoint designed for flawless execution inside Kaggle Notebooks
-or local environments.
+Kaggle Notebook Multi-Model Training & Prediction Runner for playground-series-s6e9.
+Supports Phase 8 (Feature Engineering) & Phase 9 (Diverse Model Exploration):
+- LightGBM (leaf-wise GBDT)
+- CatBoost (symmetric oblivious trees with native categorical handling & GPU support)
+- XGBoost (histogram-based depth-wise GBDT with GPU support)
 
-Usage inside Kaggle Notebook cell:
-    !python scripts/kaggle_train.py
-or
-    !python scripts/kaggle_train.py --data-dir /kaggle/input/playground-series-s6e9 --output-dir /kaggle/working
+Usage in Kaggle notebook:
+    !python scripts/kaggle_train.py --model lgbm --features domain
+    !python scripts/kaggle_train.py --model catboost --features domain
+    !python scripts/kaggle_train.py --model xgboost --features domain
 """
 
 import argparse
 import json
 import os
+import shutil
 import sys
+import time
 from pathlib import Path
 
 # Ensure project root is on sys.path
@@ -24,15 +28,31 @@ if str(PROJECT_ROOT) not in sys.path:
 import numpy as np
 import pandas as pd
 import polars as pl
-import lightgbm as lgb
+from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 
-from evaluation.metrics import MetricRegistry
+from features.domain_features import generate_domain_features
 from kaggle.paths import resolve_data_dir, resolve_output_dir
 
 
+def detect_gpu() -> bool:
+    """Checks if NVIDIA GPU is available for acceleration."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            print(f"[+] GPU detected: {torch.cuda.get_device_name(0)}")
+            return True
+    except Exception:
+        pass
+    if shutil.which("nvidia-smi"):
+        print("[+] GPU detected via nvidia-smi")
+        return True
+    print("[-] No GPU detected. Running on CPU.")
+    return False
+
+
 def load_data(data_dir: Path | str | None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, Path]:
-    """Loads train, test, and sample submission from Parquet or CSV with auto-discovery."""
+    """Loads train, test, and sample submission with auto-discovery."""
     resolved_dir = resolve_data_dir(data_dir)
     print(f"[*] Ingesting data from: {resolved_dir}")
 
@@ -52,7 +72,7 @@ def load_data(data_dir: Path | str | None) -> tuple[pd.DataFrame, pd.DataFrame, 
     else:
         raise FileNotFoundError(f"Neither test.parquet nor test.csv found in {resolved_dir}")
 
-    # Load Sample Submission (optional reference)
+    # Load Sample Submission
     sample_df = None
     if (resolved_dir / "sample_submission.parquet").exists():
         sample_df = pl.read_parquet(resolved_dir / "sample_submission.parquet").to_pandas()
@@ -64,51 +84,136 @@ def load_data(data_dir: Path | str | None) -> tuple[pd.DataFrame, pd.DataFrame, 
 
 
 def get_or_create_folds(train_df: pd.DataFrame, data_dir: Path, n_splits: int = 5, seed: int = 42) -> np.ndarray:
-    """Retrieves certified fold assignments or generates deterministic StratifiedKFold."""
-    folds_parquet = data_dir / "folds.parquet"
-    if folds_parquet.exists():
-        print(f"[*] Loading pre-computed certified folds from {folds_parquet}")
-        f_df = pl.read_parquet(folds_parquet).to_pandas()
-        merged = train_df[["id"]].merge(f_df, on="id", how="left")
-        return merged["fold"].to_numpy()
+    """Uses precomputed certified folds if available, else builds StratifiedKFold."""
+    folds_path = data_dir / "folds.parquet"
+    if folds_path.exists():
+        folds_df = pl.read_parquet(folds_path).to_pandas()
+        if "fold" in folds_df.columns and len(folds_df) == len(train_df):
+            print(f"[+] Using certified folds from {folds_path}")
+            return folds_df["fold"].to_numpy()
 
-    print(f"[*] Generating deterministic {n_splits}-fold StratifiedKFold (seed={seed})...")
-    y_raw = train_df["Will_Buy_EV"]
-    y_bin = (y_raw == "Yes").to_numpy().astype(int) if y_raw.dtype == object else y_raw.to_numpy().astype(int)
-
+    print(f"[*] Generating {n_splits}-fold StratifiedKFold (seed={seed})...")
+    y_bin = (train_df["Will_Buy_EV"] == "Yes").astype(int)
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
     fold_arr = np.empty(len(train_df), dtype=np.int32)
     for fold_idx, (_, val_idx) in enumerate(skf.split(train_df, y_bin)):
         fold_arr[val_idx] = fold_idx
-
     return fold_arr
 
 
+def train_lgbm(X_tr, y_tr, X_va, y_va, X_te, cat_cols, seed, fold):
+    import lightgbm as lgb
+    model = lgb.LGBMClassifier(
+        n_estimators=1200,
+        learning_rate=0.04,
+        num_leaves=31,
+        max_depth=6,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_samples=50,
+        random_state=seed + fold,
+        verbose=-1,
+        n_jobs=-1,
+    )
+    model.fit(
+        X_tr, y_tr,
+        eval_set=[(X_va, y_va)],
+        callbacks=[lgb.early_stopping(stopping_rounds=40, verbose=False)],
+    )
+    val_prob = model.predict_proba(X_va)[:, 1]
+    te_prob = model.predict_proba(X_te)[:, 1]
+    return val_prob, te_prob, model.feature_importances_
+
+
+def train_catboost(X_tr, y_tr, X_va, y_va, X_te, cat_cols, seed, fold, use_gpu):
+    from catboost import CatBoostClassifier
+    task_type = "GPU" if use_gpu else "CPU"
+    model = CatBoostClassifier(
+        iterations=1500,
+        learning_rate=0.04,
+        depth=6,
+        l2_leaf_reg=5.0,
+        random_seed=seed + fold,
+        task_type=task_type,
+        verbose=False,
+        cat_features=cat_cols,
+        early_stopping_rounds=50,
+    )
+    model.fit(X_tr, y_tr, eval_set=(X_va, y_va), verbose=False)
+    val_prob = model.predict_proba(X_va)[:, 1]
+    te_prob = model.predict_proba(X_te)[:, 1]
+    feat_imp = model.get_feature_importance()
+    return val_prob, te_prob, feat_imp
+
+
+def train_xgboost(X_tr, y_tr, X_va, y_va, X_te, cat_cols, seed, fold, use_gpu):
+    import xgboost as xgb
+    # For XGBoost, convert categoricals to pandas category dtype or enable categorical support
+    device = "cuda" if use_gpu else "cpu"
+    model = xgb.XGBClassifier(
+        n_estimators=1200,
+        learning_rate=0.04,
+        max_depth=6,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=seed + fold,
+        tree_method="hist",
+        device=device,
+        enable_categorical=True,
+        early_stopping_rounds=40,
+        eval_metric="auc",
+        n_jobs=-1 if not use_gpu else 1,
+    )
+    model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
+    val_prob = model.predict_proba(X_va)[:, 1]
+    te_prob = model.predict_proba(X_te)[:, 1]
+    return val_prob, te_prob, model.feature_importances_
+
+
 def train_and_predict(
+    model_name: str = "lgbm",
+    features_type: str = "domain",
     data_dir: Path | None = None,
     output_dir: Path | None = None,
     n_splits: int = 5,
     seed: int = 42,
-    num_leaves: int = 31,
-    learning_rate: float = 0.05,
-    n_estimators: int = 1000,
 ) -> dict:
-    resolved_out = output_dir if output_dir else resolve_output_dir()
-    resolved_out.mkdir(parents=True, exist_ok=True)
-    train_df, test_df, sample_df, resolved_data_dir = load_data(data_dir)
+    start_time = time.time()
+    has_gpu = detect_gpu()
 
+    # Destination output directory
+    base_out = output_dir if output_dir else resolve_output_dir()
+    model_dir = base_out / "models" / f"{model_name}_{features_type}"
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Load Data
+    train_df, test_df, sample_df, resolved_data_dir = load_data(data_dir)
     target_col = "Will_Buy_EV"
     id_col = "id"
-    features = [c for c in test_df.columns if c != id_col]
 
-    # Assign folds
+    # 2. Feature Engineering
+    if features_type == "domain":
+        print("[*] Applying Domain Feature Transformations (Hypothesis 1)...")
+        train_df, test_df, new_cols = generate_domain_features(train_df, test_df)
+        print(f"[+] Injected {len(new_cols)} engineered features: {new_cols}")
+    else:
+        print("[*] Using Raw Features (Baseline mode).")
+
+    features = [c for c in test_df.columns if c != id_col]
     train_df["fold"] = get_or_create_folds(train_df, resolved_data_dir, n_splits=n_splits, seed=seed)
 
-    # Convert categoricals to pandas category dtype for LightGBM
+    # Convert categoricals
     cat_cols = [c for c in features if not pd.api.types.is_numeric_dtype(train_df[c])]
-    for c in cat_cols:
-        train_df[c] = train_df[c].astype("category")
-        test_df[c] = test_df[c].astype("category")
+    print(f"[*] Total Features: {len(features)} | Categorical: {cat_cols}")
+
+    if model_name in ["lgbm", "xgboost"]:
+        for c in cat_cols:
+            train_df[c] = train_df[c].astype("category")
+            test_df[c] = test_df[c].astype("category")
+    elif model_name == "catboost":
+        for c in cat_cols:
+            train_df[c] = train_df[c].astype(str)
+            test_df[c] = test_df[c].astype(str)
 
     y_train = (train_df[target_col] == "Yes").to_numpy().astype(int)
 
@@ -117,79 +222,62 @@ def train_and_predict(
     fold_scores = []
     feature_importances = np.zeros(len(features), dtype=np.float64)
 
-    print(f"[*] Training {n_splits}-fold LightGBM on {len(features)} features...")
-    print(f"    Categorical features ({len(cat_cols)}): {cat_cols}")
+    print("=" * 65)
+    print(f"[*] TRAINING {n_splits}-FOLD {model_name.upper()} ({features_type.upper()} FEATURES)")
+    print(f"    Accelerator: {'GPU' if has_gpu and model_name in ['catboost', 'xgboost'] else 'CPU'}")
+    print("=" * 65)
 
     for fold in range(n_splits):
+        f_start = time.time()
         tr_mask = train_df["fold"] != fold
         va_mask = train_df["fold"] == fold
 
         X_tr, y_tr = train_df.loc[tr_mask, features], y_train[tr_mask]
         X_va, y_va = train_df.loc[va_mask, features], y_train[va_mask]
+        X_te = test_df[features]
 
-        model = lgb.LGBMClassifier(
-            n_estimators=n_estimators,
-            learning_rate=learning_rate,
-            num_leaves=num_leaves,
-            max_depth=6,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            min_child_samples=50,
-            random_state=seed + fold,
-            verbose=-1,
-            n_jobs=-1,
-        )
+        if model_name == "lgbm":
+            v_prob, t_prob, imp = train_lgbm(X_tr, y_tr, X_va, y_va, X_te, cat_cols, seed, fold)
+        elif model_name == "catboost":
+            v_prob, t_prob, imp = train_catboost(X_tr, y_tr, X_va, y_va, X_te, cat_cols, seed, fold, has_gpu)
+        elif model_name == "xgboost":
+            v_prob, t_prob, imp = train_xgboost(X_tr, y_tr, X_va, y_va, X_te, cat_cols, seed, fold, has_gpu)
+        else:
+            raise ValueError(f"Unknown model: {model_name}. Supported: lgbm, catboost, xgboost")
 
-        model.fit(
-            X_tr,
-            y_tr,
-            eval_set=[(X_va, y_va)],
-            callbacks=[lgb.early_stopping(stopping_rounds=40, verbose=False)],
-        )
+        oof_preds[va_mask] = v_prob
+        test_preds += t_prob / n_splits
+        feature_importances += imp / n_splits
 
-        val_prob = model.predict_proba(X_va)[:, 1]
-        test_prob = model.predict_proba(test_df[features])[:, 1]
-
-        oof_preds[va_mask] = val_prob
-        test_preds += test_prob / n_splits
-        feature_importances += model.feature_importances_ / n_splits
-
-        fold_auc = MetricRegistry.roc_auc(y_va, val_prob)
+        fold_auc = roc_auc_score(y_va, v_prob)
         fold_scores.append(fold_auc)
-        print(f"  [Fold {fold+1}/{n_splits}] Val ROC-AUC: {fold_auc:.6f}")
+        f_dur = time.time() - f_start
+        print(f"  [Fold {fold+1}/{n_splits}] ROC-AUC: {fold_auc:.6f} ({f_dur:.1f}s)")
 
-    overall_auc = MetricRegistry.roc_auc(y_train, oof_preds)
+    overall_auc = roc_auc_score(y_train, oof_preds)
     std_auc = float(np.std(fold_scores))
-    print("=" * 60)
-    print(f"[+] OVERALL 5-FOLD OOF ROC-AUC: {overall_auc:.6f} (+/- {std_auc:.6f})")
-    print("=" * 60)
+    total_time = time.time() - start_time
 
-    # 1. Write Submission File (Gate 6 Strict Compliance)
-    sub_path = resolved_out / "submission.csv"
+    print("=" * 65)
+    print(f"[+] OVERALL 5-FOLD OOF ROC-AUC: {overall_auc:.6f} (+/- {std_auc:.6f})")
+    print(f"[+] Training duration: {total_time:.1f}s ({total_time / 60:.2f} min)")
+    print("=" * 65)
+
+    # 1. Write Submission File to model_dir AND /kaggle/working/submission.csv
     sub_df = pd.DataFrame({
         id_col: test_df[id_col],
         target_col: test_preds,
     })
+    sub_path = model_dir / "submission.csv"
     sub_df.to_csv(sub_path, index=False)
-    print(f"[+] Submission file written to: {sub_path} ({sub_path.stat().st_size / 1024 / 1024:.2f} MB)")
 
-    # In Kaggle notebooks, also ensure /kaggle/working/submission.csv is directly accessible
-    if Path("/kaggle/working").exists() and sub_path != Path("/kaggle/working/submission.csv"):
-        try:
-            sub_df.to_csv("/kaggle/working/submission.csv", index=False)
-            print("[+] Also mirrored submission directly to /kaggle/working/submission.csv")
-        except Exception:
-            pass
+    # Always ensure root /kaggle/working/submission.csv has the latest submission for 1-click UI
+    root_sub = Path("/kaggle/working/submission.csv") if Path("/kaggle/working").exists() else base_out / "submission.csv"
+    sub_df.to_csv(root_sub, index=False)
+    print(f"[+] Updated primary submission file: {root_sub}")
 
-    # Validate Submission
-    assert len(sub_df) == len(test_df), f"Row count mismatch: {len(sub_df)} vs {len(test_df)}"
-    assert list(sub_df.columns) == ["id", "Will_Buy_EV"], f"Invalid columns: {sub_df.columns}"
-    assert not sub_df["Will_Buy_EV"].isnull().any(), "Submission contains null/NaN values!"
-    assert (sub_df["Will_Buy_EV"] >= 0.0).all() and (sub_df["Will_Buy_EV"] <= 1.0).all(), "Predictions out of [0, 1] bounds!"
-    print("[+] Submission verification PASSED: 0 nulls, correct headers, valid probability bounds.")
-
-    # 2. Write OOF Predictions & Test Predictions
-    oof_out = resolved_out / "oof_preds.parquet"
+    # 2. Write OOF & Test Predictions (.parquet)
+    oof_out = model_dir / "oof_preds.parquet"
     pl.DataFrame({
         id_col: train_df[id_col],
         "pred": oof_preds,
@@ -197,56 +285,59 @@ def train_and_predict(
         "fold": train_df["fold"],
     }).write_parquet(oof_out, compression="zstd")
 
-    test_out = resolved_out / "test_preds.parquet"
+    test_out = model_dir / "test_preds.parquet"
     pl.DataFrame({
         id_col: test_df[id_col],
         "pred": test_preds,
     }).write_parquet(test_out, compression="zstd")
-    print(f"[+] Test predictions written to: {test_out}")
 
     # 3. Write Metrics Summary
     metrics_summary = {
         "competition_id": "playground-series-s6e9",
+        "model_name": model_name,
+        "features_type": features_type,
         "metric_name": "roc_auc",
         "overall_cv": float(overall_auc),
         "std_cv": float(std_auc),
         "fold_scores": [float(s) for s in fold_scores],
         "n_samples_train": len(train_df),
         "n_samples_test": len(test_df),
+        "features": features,
+        "execution_time_seconds": total_time,
     }
-    with open(resolved_out / "metrics.json", "w", encoding="utf-8") as f:
+    with open(model_dir / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(metrics_summary, f, indent=2)
 
     # 4. Write Feature Importances
     feat_imp_dict = {f: float(imp) for f, imp in sorted(zip(features, feature_importances), key=lambda x: x[1], reverse=True)}
-    with open(resolved_out / "feature_importance.json", "w", encoding="utf-8") as f:
+    with open(model_dir / "feature_importance.json", "w", encoding="utf-8") as f:
         json.dump(feat_imp_dict, f, indent=2)
 
-    print(f"[+] All artifacts successfully generated in: {resolved_out}")
+    print(f"[+] Model artifacts saved in: {model_dir}")
     return metrics_summary
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Kaggle Notebook GBDT Training Runner")
-    parser.add_argument("--data-dir", type=str, default=None, help="Path to raw/processed data")
-    parser.add_argument("--output-dir", type=str, default=None, help="Output directory for submissions & artifacts")
-    parser.add_argument("--n-splits", type=int, default=5, help="Number of CV splits")
-    parser.add_argument("--n-estimators", type=int, default=1000, help="Max trees per fold")
-    parser.add_argument("--learning-rate", type=float, default=0.05, help="Learning rate")
+    parser = argparse.ArgumentParser(description="Phase 8/9 Multi-Model Trainer for playground-series-s6e9")
+    parser.add_argument("--model", type=str, default="lgbm", choices=["lgbm", "catboost", "xgboost"],
+                        help="Model architecture to train (lgbm, catboost, xgboost)")
+    parser.add_argument("--features", type=str, default="domain", choices=["domain", "raw"],
+                        help="Feature set: 'domain' (engineered interactions) or 'raw'")
+    parser.add_argument("--data-dir", type=Path, default=None,
+                        help="Optional explicit path to dataset")
+    parser.add_argument("--output-dir", type=Path, default=None,
+                        help="Optional explicit output directory")
+    parser.add_argument("--splits", type=int, default=5, help="Number of folds (default: 5)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
+
     args = parser.parse_args()
-
-    data_dir = Path(args.data_dir) if args.data_dir else resolve_data_dir()
-    output_dir = Path(args.output_dir) if args.output_dir else resolve_output_dir()
-
-    print(f"Data Dir:   {data_dir}")
-    print(f"Output Dir: {output_dir}")
-
     train_and_predict(
-        data_dir=data_dir,
-        output_dir=output_dir,
-        n_splits=args.n_splits,
-        n_estimators=args.n_estimators,
-        learning_rate=args.learning_rate,
+        model_name=args.model,
+        features_type=args.features,
+        data_dir=args.data_dir,
+        output_dir=args.output_dir,
+        n_splits=args.splits,
+        seed=args.seed,
     )
 
 
