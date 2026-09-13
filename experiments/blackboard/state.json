@@ -1,10 +1,14 @@
 {
   "competition_id": "playground-series-s6e9",
-  "phase": "BASELINE",
-  "current_iteration": 18,
+  "phase": "TERMINATED",
+  "current_iteration": 30,
   "cleared_gates": [
     "GATE_1_DATA_INTEGRITY",
-    "GATE_2_VALIDATION_VETO"
+    "GATE_2_VALIDATION_VETO",
+    "GATE_3_PIPELINE_SMOKE",
+    "GATE_4_EV_COMPUTE",
+    "GATE_5_BLENDING_METRIC",
+    "GATE_6_SUBMISSION_VETO"
   ],
   "budget": {
     "weekly_gpu_limit_hours": 30.0,
@@ -15,9 +19,9 @@
     "daily_submission_limit": 5
   },
   "active_locks": [],
-  "best_cv_score": 0.9116815040572557,
-  "best_run_id": "ensemble_blend",
-  "public_lb_score": null,
-  "last_updated": "2026-09-13T05:07:49.537633+00:00",
+  "best_cv_score": 0.9418285717233725,
+  "best_run_id": "baseline_lgbm_001",
+  "public_lb_score": 0.94168,
+  "last_updated": "2026-09-13T05:31:00+00:00",
   "metadata": {}
 }
