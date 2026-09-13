@@ -159,22 +159,25 @@ def train_single_model(
             va_100 = te_100.transform(X_va[te_cols])
             te_100_arr = te_100.transform(X_te[te_cols])
 
+            te_data_tr = {}
+            te_data_va = {}
+            te_data_te = {}
             for idx, col in enumerate(te_cols):
-                X_tr[f"{col}_TE_auto"] = tr_auto[:, idx].astype("float32")
-                X_va[f"{col}_TE_auto"] = va_auto[:, idx].astype("float32")
-                X_te[f"{col}_TE_auto"] = te_auto_arr[:, idx].astype("float32")
+                te_data_tr[f"{col}_TE_auto"] = tr_auto[:, idx].astype("float32")
+                te_data_va[f"{col}_TE_auto"] = va_auto[:, idx].astype("float32")
+                te_data_te[f"{col}_TE_auto"] = te_auto_arr[:, idx].astype("float32")
 
-                X_tr[f"{col}_TE_10"] = tr_10[:, idx].astype("float32")
-                X_va[f"{col}_TE_10"] = va_10[:, idx].astype("float32")
-                X_te[f"{col}_TE_10"] = te_10_arr[:, idx].astype("float32")
+                te_data_tr[f"{col}_TE_10"] = tr_10[:, idx].astype("float32")
+                te_data_va[f"{col}_TE_10"] = va_10[:, idx].astype("float32")
+                te_data_te[f"{col}_TE_10"] = te_10_arr[:, idx].astype("float32")
 
-                X_tr[f"{col}_TE_100"] = tr_100[:, idx].astype("float32")
-                X_va[f"{col}_TE_100"] = va_100[:, idx].astype("float32")
-                X_te[f"{col}_TE_100"] = te_100_arr[:, idx].astype("float32")
+                te_data_tr[f"{col}_TE_100"] = tr_100[:, idx].astype("float32")
+                te_data_va[f"{col}_TE_100"] = va_100[:, idx].astype("float32")
+                te_data_te[f"{col}_TE_100"] = te_100_arr[:, idx].astype("float32")
 
-            X_tr.drop(columns=te_cols, inplace=True)
-            X_va.drop(columns=te_cols, inplace=True)
-            X_te.drop(columns=te_cols, inplace=True)
+            X_tr = pd.concat([X_tr.drop(columns=te_cols), pd.DataFrame(te_data_tr, index=X_tr.index)], axis=1)
+            X_va = pd.concat([X_va.drop(columns=te_cols), pd.DataFrame(te_data_va, index=X_va.index)], axis=1)
+            X_te = pd.concat([X_te.drop(columns=te_cols), pd.DataFrame(te_data_te, index=X_te.index)], axis=1)
 
         if model_type == "lgbm":
             import lightgbm as lgb

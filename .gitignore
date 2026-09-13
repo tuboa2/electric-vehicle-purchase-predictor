@@ -62,5 +62,6 @@ Thumbs.db
 
 # Root runtime artifacts
 *.zip
-submission.csv
+*.csv
+!data/original/**
 uv.lock

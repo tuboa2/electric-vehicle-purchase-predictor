@@ -1,9 +1,11 @@
 """
-Unit tests for Grandmaster Feature Engineering module.
+Unit tests for Grandmaster Feature Engineering module and fold processing.
 """
 
+import warnings
 import pandas as pd
 import numpy as np
+from sklearn.preprocessing import TargetEncoder
 from features.grandmaster_features import build_grandmaster_features, TARGET
 
 
@@ -48,3 +50,31 @@ def test_build_grandmaster_features_smoke():
     num_cols = [c for c in features if c not in te_cols]
     assert not tr_feat[num_cols].isnull().any().any(), "Train features contain NaNs!"
     assert not te_feat[num_cols].isnull().any().any(), "Test features contain NaNs!"
+
+
+def test_te_fold_concatenation_no_warning():
+    """Verify that Target Encoding fold concatenation generates zero PerformanceWarning."""
+    np.random.seed(42)
+    n = 100
+    df = pd.DataFrame({
+        "cat1": np.random.choice(["A", "B", "C"], size=n),
+        "cat2": np.random.choice(["X", "Y", "Z"], size=n),
+        "num": np.random.randn(n),
+    })
+    y = np.random.choice([0, 1], size=n)
+    te_cols = ["cat1", "cat2"]
+
+    te = TargetEncoder(smooth=10.0, random_state=42)
+    enc = te.fit_transform(df[te_cols], y)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", pd.errors.PerformanceWarning)
+        te_data = {}
+        for idx, col in enumerate(te_cols):
+            te_data[f"{col}_TE"] = enc[:, idx].astype("float32")
+        res = pd.concat([df.drop(columns=te_cols), pd.DataFrame(te_data, index=df.index)], axis=1)
+
+    assert "cat1_TE" in res.columns
+    assert "cat2_TE" in res.columns
+    assert "cat1" not in res.columns
+    assert len(res) == n
