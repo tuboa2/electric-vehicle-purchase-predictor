@@ -1,0 +1,61 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Pytest & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Sensitive credentials & environment variables
+.env
+.env.*
+kaggle.json
+
+# Data files (heavy datasets excluded from git)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Ephemeral runtime artifacts & worktrees
+experiments/worktrees/*
+!experiments/worktrees/.gitkeep
+experiments/blackboard/active_runs/*
+!experiments/blackboard/active_runs/.gitkeep
+experiments/blackboard/vetos/*
+!experiments/blackboard/vetos/.gitkeep
+experiments/blackboard/*.tmp*
+experiments/submissions/*
+!experiments/submissions/.gitkeep
+experiments/artifacts/*
+!experiments/artifacts/.gitkeep
+
+# External large skills catalog (kept out of competition repo for fast lightweight pull)
+.agents/skills/
+
+# Local SQLite database files & runtime logs
+memory/*.db
+memory/*.db-journal
+memory/*.sqlite
+observability/logs/*.log
+!observability/logs/.gitkeep
+
+# Operating system files
+.DS_Store
+Thumbs.db

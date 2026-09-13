@@ -1,0 +1,137 @@
+{"timestamp": "2026-09-13T04:07:34.544383+00:00", "role": "init", "action": "STATE_TRANSITION", "details": {"phase": "INITIALIZED", "iteration": 0}}
+{"timestamp": "2026-09-13T04:07:34.551612+00:00", "role": "scout", "action": "STATE_TRANSITION", "details": {"phase": "RECONNAISSANCE", "iteration": 1}}
+{"timestamp": "2026-09-13T04:07:34.560602+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "INGESTION", "iteration": 2}}
+{"timestamp": "2026-09-13T04:07:34.852075+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "EDA", "iteration": 3}}
+{"timestamp": "2026-09-13T04:07:34.859635+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "ADVERSARIAL_VAL", "iteration": 4}}
+{"timestamp": "2026-09-13T04:07:40.193133+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "ADVERSARIAL_VAL", "iteration": 4}}
+{"timestamp": "2026-09-13T04:07:40.193330+00:00", "role": "data_forensics", "action": "GATE_CLEARED", "details": {"gate": "GATE_1_DATA_INTEGRITY"}}
+{"timestamp": "2026-09-13T04:07:40.194335+00:00", "role": "validation_architect", "action": "STATE_TRANSITION", "details": {"phase": "CV_FORMULATION", "iteration": 5}}
+{"timestamp": "2026-09-13T04:07:40.743596+00:00", "role": "leakage_compliance", "action": "STATE_TRANSITION", "details": {"phase": "LEAKAGE_AUDIT", "iteration": 6}}
+{"timestamp": "2026-09-13T04:07:40.764194+00:00", "role": "leakage_compliance", "action": "STATE_TRANSITION", "details": {"phase": "LEAKAGE_AUDIT", "iteration": 6}}
+{"timestamp": "2026-09-13T04:07:40.764468+00:00", "role": "leakage_compliance", "action": "GATE_CLEARED", "details": {"gate": "GATE_2_VALIDATION_VETO"}}
+{"timestamp": "2026-09-13T04:07:40.768220+00:00", "role": "runner", "action": "STATE_TRANSITION", "details": {"phase": "BASELINE", "iteration": 7}}
+{"timestamp": "2026-09-13T04:08:04.376678+00:00", "role": "runner", "action": "STATE_TRANSITION", "details": {"phase": "BASELINE", "iteration": 7}}
+{"timestamp": "2026-09-13T04:08:04.376947+00:00", "role": "runner", "action": "GATE_CLEARED", "details": {"gate": "GATE_3_PIPELINE_SMOKE"}}
+{"timestamp": "2026-09-13T04:08:04.394657+00:00", "role": "experiment_manager", "action": "STATE_TRANSITION", "details": {"phase": "HYPOTHESIS_QUEUE", "iteration": 8}}
+{"timestamp": "2026-09-13T04:08:04.751229+00:00", "role": "experiment_manager", "action": "STATE_TRANSITION", "details": {"phase": "HYPOTHESIS_QUEUE", "iteration": 8}}
+{"timestamp": "2026-09-13T04:08:04.751458+00:00", "role": "experiment_manager", "action": "GATE_CLEARED", "details": {"gate": "GATE_4_EV_COMPUTE"}}
+{"timestamp": "2026-09-13T04:08:04.752589+00:00", "role": "blender", "action": "STATE_TRANSITION", "details": {"phase": "ENSEMBLING", "iteration": 9}}
+{"timestamp": "2026-09-13T04:08:04.913138+00:00", "role": "artifact_analyst", "action": "STATE_TRANSITION", "details": {"phase": "ENSEMBLING", "iteration": 9}}
+{"timestamp": "2026-09-13T04:08:04.913399+00:00", "role": "artifact_analyst", "action": "GATE_CLEARED", "details": {"gate": "GATE_6_SUBMISSION_VETO"}}
+{"timestamp": "2026-09-13T04:08:04.922870+00:00", "role": "kaggle_executor", "action": "STATE_TRANSITION", "details": {"phase": "KAGGLE_SUBMISSION", "iteration": 10}}
+{"timestamp": "2026-09-13T04:08:04.924459+00:00", "role": "memory_curator", "action": "STATE_TRANSITION", "details": {"phase": "POSTMORTEM", "iteration": 11}}
+{"timestamp": "2026-09-13T04:08:04.934736+00:00", "role": "pipeline_completion", "action": "STATE_TRANSITION", "details": {"phase": "TERMINATED", "iteration": 11}}
+{"timestamp": "2026-09-13T04:09:09.759187+00:00", "role": "scout", "action": "STATE_TRANSITION", "details": {"phase": "RECONNAISSANCE", "iteration": 12}}
+{"timestamp": "2026-09-13T04:09:09.767778+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "INGESTION", "iteration": 13}}
+{"timestamp": "2026-09-13T04:09:09.963725+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "EDA", "iteration": 14}}
+{"timestamp": "2026-09-13T04:09:09.979395+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "ADVERSARIAL_VAL", "iteration": 15}}
+{"timestamp": "2026-09-13T04:10:10.230306+00:00", "role": "scout", "action": "STATE_TRANSITION", "details": {"phase": "RECONNAISSANCE", "iteration": 16}}
+{"timestamp": "2026-09-13T04:10:10.239918+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "INGESTION", "iteration": 17}}
+{"timestamp": "2026-09-13T04:10:10.422735+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "EDA", "iteration": 18}}
+{"timestamp": "2026-09-13T04:10:10.431360+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "ADVERSARIAL_VAL", "iteration": 19}}
+{"timestamp": "2026-09-13T04:10:16.323190+00:00", "role": "validation_architect", "action": "STATE_TRANSITION", "details": {"phase": "CV_FORMULATION", "iteration": 20}}
+{"timestamp": "2026-09-13T04:10:16.612321+00:00", "role": "leakage_compliance", "action": "STATE_TRANSITION", "details": {"phase": "LEAKAGE_AUDIT", "iteration": 21}}
+{"timestamp": "2026-09-13T04:10:16.641078+00:00", "role": "runner", "action": "STATE_TRANSITION", "details": {"phase": "BASELINE", "iteration": 22}}
+{"timestamp": "2026-09-13T04:10:42.612781+00:00", "role": "experiment_manager", "action": "STATE_TRANSITION", "details": {"phase": "HYPOTHESIS_QUEUE", "iteration": 23}}
+{"timestamp": "2026-09-13T04:10:42.796363+00:00", "role": "blender", "action": "STATE_TRANSITION", "details": {"phase": "ENSEMBLING", "iteration": 24}}
+{"timestamp": "2026-09-13T04:11:17.383752+00:00", "role": "scout", "action": "STATE_TRANSITION", "details": {"phase": "RECONNAISSANCE", "iteration": 25}}
+{"timestamp": "2026-09-13T04:11:17.385237+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "INGESTION", "iteration": 26}}
+{"timestamp": "2026-09-13T04:11:17.550156+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "EDA", "iteration": 27}}
+{"timestamp": "2026-09-13T04:11:17.555052+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "ADVERSARIAL_VAL", "iteration": 28}}
+{"timestamp": "2026-09-13T04:11:22.344087+00:00", "role": "validation_architect", "action": "STATE_TRANSITION", "details": {"phase": "CV_FORMULATION", "iteration": 29}}
+{"timestamp": "2026-09-13T04:11:22.695685+00:00", "role": "leakage_compliance", "action": "STATE_TRANSITION", "details": {"phase": "LEAKAGE_AUDIT", "iteration": 30}}
+{"timestamp": "2026-09-13T04:11:22.711082+00:00", "role": "runner", "action": "STATE_TRANSITION", "details": {"phase": "BASELINE", "iteration": 31}}
+{"timestamp": "2026-09-13T04:11:42.088597+00:00", "role": "experiment_manager", "action": "STATE_TRANSITION", "details": {"phase": "HYPOTHESIS_QUEUE", "iteration": 32}}
+{"timestamp": "2026-09-13T04:11:42.247029+00:00", "role": "blender", "action": "STATE_TRANSITION", "details": {"phase": "ENSEMBLING", "iteration": 33}}
+{"timestamp": "2026-09-13T04:11:42.322310+00:00", "role": "blender", "action": "STATE_TRANSITION", "details": {"phase": "ENSEMBLING", "iteration": 33}}
+{"timestamp": "2026-09-13T04:11:42.322530+00:00", "role": "blender", "action": "GATE_CLEARED", "details": {"gate": "GATE_5_BLENDING_METRIC"}}
+{"timestamp": "2026-09-13T04:11:42.338061+00:00", "role": "artifact_analyst", "action": "STATE_TRANSITION", "details": {"phase": "PRE_SUBMISSION_AUDIT", "iteration": 34}}
+{"timestamp": "2026-09-13T04:11:42.357759+00:00", "role": "kaggle_executor", "action": "STATE_TRANSITION", "details": {"phase": "KAGGLE_SUBMISSION", "iteration": 35}}
+{"timestamp": "2026-09-13T04:11:42.362390+00:00", "role": "memory_curator", "action": "STATE_TRANSITION", "details": {"phase": "POSTMORTEM", "iteration": 36}}
+{"timestamp": "2026-09-13T04:11:42.368686+00:00", "role": "pipeline_completion", "action": "STATE_TRANSITION", "details": {"phase": "TERMINATED", "iteration": 36}}
+{"timestamp": "2026-09-13T04:12:10.321451+00:00", "role": "scout", "action": "STATE_TRANSITION", "details": {"phase": "RECONNAISSANCE", "iteration": 37}}
+{"timestamp": "2026-09-13T04:12:10.330581+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "INGESTION", "iteration": 38}}
+{"timestamp": "2026-09-13T04:12:10.469549+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "EDA", "iteration": 39}}
+{"timestamp": "2026-09-13T04:12:10.472679+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "ADVERSARIAL_VAL", "iteration": 40}}
+{"timestamp": "2026-09-13T04:12:14.966171+00:00", "role": "validation_architect", "action": "STATE_TRANSITION", "details": {"phase": "CV_FORMULATION", "iteration": 41}}
+{"timestamp": "2026-09-13T04:12:15.151816+00:00", "role": "leakage_compliance", "action": "STATE_TRANSITION", "details": {"phase": "LEAKAGE_AUDIT", "iteration": 42}}
+{"timestamp": "2026-09-13T04:12:15.170192+00:00", "role": "runner", "action": "STATE_TRANSITION", "details": {"phase": "BASELINE", "iteration": 43}}
+{"timestamp": "2026-09-13T04:12:36.021877+00:00", "role": "experiment_manager", "action": "STATE_TRANSITION", "details": {"phase": "HYPOTHESIS_QUEUE", "iteration": 44}}
+{"timestamp": "2026-09-13T04:12:36.167860+00:00", "role": "blender", "action": "STATE_TRANSITION", "details": {"phase": "ENSEMBLING", "iteration": 45}}
+{"timestamp": "2026-09-13T04:12:36.245985+00:00", "role": "artifact_analyst", "action": "STATE_TRANSITION", "details": {"phase": "PRE_SUBMISSION_AUDIT", "iteration": 46}}
+{"timestamp": "2026-09-13T04:12:36.260662+00:00", "role": "kaggle_executor", "action": "STATE_TRANSITION", "details": {"phase": "KAGGLE_SUBMISSION", "iteration": 47}}
+{"timestamp": "2026-09-13T04:12:36.271701+00:00", "role": "memory_curator", "action": "STATE_TRANSITION", "details": {"phase": "POSTMORTEM", "iteration": 48}}
+{"timestamp": "2026-09-13T04:12:36.280022+00:00", "role": "pipeline_completion", "action": "STATE_TRANSITION", "details": {"phase": "TERMINATED", "iteration": 48}}
+{"timestamp": "2026-09-13T04:52:05.601135+00:00", "role": "init_competition", "action": "STATE_TRANSITION", "details": {"phase": "INITIALIZED", "iteration": 0}}
+{"timestamp": "2026-09-13T04:56:19.998868+00:00", "role": "scout", "action": "STATE_TRANSITION", "details": {"phase": "RECONNAISSANCE", "iteration": 1}}
+{"timestamp": "2026-09-13T04:56:20.006881+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "INGESTION", "iteration": 2}}
+{"timestamp": "2026-09-13T04:56:20.124071+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "EDA", "iteration": 3}}
+{"timestamp": "2026-09-13T04:56:20.127465+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "ADVERSARIAL_VAL", "iteration": 4}}
+{"timestamp": "2026-09-13T04:56:20.838547+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "ADVERSARIAL_VAL", "iteration": 4}}
+{"timestamp": "2026-09-13T04:56:20.838825+00:00", "role": "data_forensics", "action": "GATE_CLEARED", "details": {"gate": "GATE_1_DATA_INTEGRITY"}}
+{"timestamp": "2026-09-13T04:56:20.839880+00:00", "role": "validation_architect", "action": "STATE_TRANSITION", "details": {"phase": "CV_FORMULATION", "iteration": 5}}
+{"timestamp": "2026-09-13T04:56:20.935080+00:00", "role": "leakage_compliance", "action": "STATE_TRANSITION", "details": {"phase": "LEAKAGE_AUDIT", "iteration": 6}}
+{"timestamp": "2026-09-13T04:56:20.939496+00:00", "role": "leakage_compliance", "action": "STATE_TRANSITION", "details": {"phase": "LEAKAGE_AUDIT", "iteration": 6}}
+{"timestamp": "2026-09-13T04:56:20.939742+00:00", "role": "leakage_compliance", "action": "GATE_CLEARED", "details": {"gate": "GATE_2_VALIDATION_VETO"}}
+{"timestamp": "2026-09-13T04:56:20.941592+00:00", "role": "runner", "action": "STATE_TRANSITION", "details": {"phase": "BASELINE", "iteration": 7}}
+{"timestamp": "2026-09-13T04:56:22.059034+00:00", "role": "runner", "action": "STATE_TRANSITION", "details": {"phase": "BASELINE", "iteration": 7}}
+{"timestamp": "2026-09-13T04:56:22.059306+00:00", "role": "runner", "action": "GATE_CLEARED", "details": {"gate": "GATE_3_PIPELINE_SMOKE"}}
+{"timestamp": "2026-09-13T04:56:22.060832+00:00", "role": "experiment_manager", "action": "STATE_TRANSITION", "details": {"phase": "HYPOTHESIS_QUEUE", "iteration": 8}}
+{"timestamp": "2026-09-13T04:56:22.124774+00:00", "role": "experiment_manager", "action": "STATE_TRANSITION", "details": {"phase": "HYPOTHESIS_QUEUE", "iteration": 8}}
+{"timestamp": "2026-09-13T04:56:22.125548+00:00", "role": "experiment_manager", "action": "GATE_CLEARED", "details": {"gate": "GATE_4_EV_COMPUTE"}}
+{"timestamp": "2026-09-13T04:56:22.127611+00:00", "role": "blender", "action": "STATE_TRANSITION", "details": {"phase": "ENSEMBLING", "iteration": 9}}
+{"timestamp": "2026-09-13T04:56:22.156968+00:00", "role": "blender", "action": "STATE_TRANSITION", "details": {"phase": "ENSEMBLING", "iteration": 9}}
+{"timestamp": "2026-09-13T04:56:22.157202+00:00", "role": "blender", "action": "GATE_CLEARED", "details": {"gate": "GATE_5_BLENDING_METRIC"}}
+{"timestamp": "2026-09-13T04:56:22.165476+00:00", "role": "artifact_analyst", "action": "STATE_TRANSITION", "details": {"phase": "PRE_SUBMISSION_AUDIT", "iteration": 10}}
+{"timestamp": "2026-09-13T04:56:22.169788+00:00", "role": "artifact_analyst", "action": "STATE_TRANSITION", "details": {"phase": "PRE_SUBMISSION_AUDIT", "iteration": 10}}
+{"timestamp": "2026-09-13T04:56:22.170092+00:00", "role": "artifact_analyst", "action": "GATE_CLEARED", "details": {"gate": "GATE_6_SUBMISSION_VETO"}}
+{"timestamp": "2026-09-13T04:56:22.171228+00:00", "role": "kaggle_executor", "action": "STATE_TRANSITION", "details": {"phase": "KAGGLE_SUBMISSION", "iteration": 11}}
+{"timestamp": "2026-09-13T04:56:22.172457+00:00", "role": "memory_curator", "action": "STATE_TRANSITION", "details": {"phase": "POSTMORTEM", "iteration": 12}}
+{"timestamp": "2026-09-13T04:56:22.173720+00:00", "role": "pipeline_completion", "action": "STATE_TRANSITION", "details": {"phase": "TERMINATED", "iteration": 12}}
+{"timestamp": "2026-09-13T04:57:29.140962+00:00", "role": "scout", "action": "STATE_TRANSITION", "details": {"phase": "RECONNAISSANCE", "iteration": 13}}
+{"timestamp": "2026-09-13T04:57:29.143244+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "INGESTION", "iteration": 14}}
+{"timestamp": "2026-09-13T04:57:29.195650+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "EDA", "iteration": 15}}
+{"timestamp": "2026-09-13T04:57:29.197513+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "ADVERSARIAL_VAL", "iteration": 16}}
+{"timestamp": "2026-09-13T04:57:29.771392+00:00", "role": "validation_architect", "action": "STATE_TRANSITION", "details": {"phase": "CV_FORMULATION", "iteration": 17}}
+{"timestamp": "2026-09-13T04:57:29.848504+00:00", "role": "leakage_compliance", "action": "STATE_TRANSITION", "details": {"phase": "LEAKAGE_AUDIT", "iteration": 18}}
+{"timestamp": "2026-09-13T04:57:29.852418+00:00", "role": "runner", "action": "STATE_TRANSITION", "details": {"phase": "BASELINE", "iteration": 19}}
+{"timestamp": "2026-09-13T04:57:30.903149+00:00", "role": "experiment_manager", "action": "STATE_TRANSITION", "details": {"phase": "HYPOTHESIS_QUEUE", "iteration": 20}}
+{"timestamp": "2026-09-13T04:57:30.954441+00:00", "role": "blender", "action": "STATE_TRANSITION", "details": {"phase": "ENSEMBLING", "iteration": 21}}
+{"timestamp": "2026-09-13T04:57:31.017478+00:00", "role": "artifact_analyst", "action": "STATE_TRANSITION", "details": {"phase": "PRE_SUBMISSION_AUDIT", "iteration": 22}}
+{"timestamp": "2026-09-13T04:57:31.024205+00:00", "role": "kaggle_executor", "action": "STATE_TRANSITION", "details": {"phase": "KAGGLE_SUBMISSION", "iteration": 23}}
+{"timestamp": "2026-09-13T04:57:31.026540+00:00", "role": "memory_curator", "action": "STATE_TRANSITION", "details": {"phase": "POSTMORTEM", "iteration": 24}}
+{"timestamp": "2026-09-13T04:57:31.028882+00:00", "role": "pipeline_completion", "action": "STATE_TRANSITION", "details": {"phase": "TERMINATED", "iteration": 24}}
+{"timestamp": "2026-09-13T04:58:00.369786+00:00", "role": "scout", "action": "STATE_TRANSITION", "details": {"phase": "RECONNAISSANCE", "iteration": 1}}
+{"timestamp": "2026-09-13T04:59:48.522075+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "EDA", "iteration": 2}}
+{"timestamp": "2026-09-13T05:02:01.422885+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "ADVERSARIAL_VAL", "iteration": 3}}
+{"timestamp": "2026-09-13T05:02:19.073562+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "ADVERSARIAL_VAL", "iteration": 3}}
+{"timestamp": "2026-09-13T05:02:19.073828+00:00", "role": "data_forensics", "action": "GATE_CLEARED", "details": {"gate": "GATE_1_DATA_INTEGRITY"}}
+{"timestamp": "2026-09-13T05:03:48.451621+00:00", "role": "validation_architect", "action": "STATE_TRANSITION", "details": {"phase": "CV_FORMULATION", "iteration": 4}}
+{"timestamp": "2026-09-13T05:04:16.913203+00:00", "role": "scout", "action": "STATE_TRANSITION", "details": {"phase": "RECONNAISSANCE", "iteration": 5}}
+{"timestamp": "2026-09-13T05:04:16.918039+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "INGESTION", "iteration": 6}}
+{"timestamp": "2026-09-13T05:04:17.011375+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "EDA", "iteration": 7}}
+{"timestamp": "2026-09-13T05:04:17.018385+00:00", "role": "data_forensics", "action": "STATE_TRANSITION", "details": {"phase": "ADVERSARIAL_VAL", "iteration": 8}}
+{"timestamp": "2026-09-13T05:04:17.646628+00:00", "role": "validation_architect", "action": "STATE_TRANSITION", "details": {"phase": "CV_FORMULATION", "iteration": 9}}
+{"timestamp": "2026-09-13T05:04:17.736761+00:00", "role": "leakage_compliance", "action": "STATE_TRANSITION", "details": {"phase": "LEAKAGE_AUDIT", "iteration": 10}}
+{"timestamp": "2026-09-13T05:04:17.741017+00:00", "role": "leakage_compliance", "action": "STATE_TRANSITION", "details": {"phase": "LEAKAGE_AUDIT", "iteration": 10}}
+{"timestamp": "2026-09-13T05:04:17.741247+00:00", "role": "leakage_compliance", "action": "GATE_CLEARED", "details": {"gate": "GATE_2_VALIDATION_VETO"}}
+{"timestamp": "2026-09-13T05:04:17.742562+00:00", "role": "runner", "action": "STATE_TRANSITION", "details": {"phase": "BASELINE", "iteration": 11}}
+{"timestamp": "2026-09-13T05:04:18.823713+00:00", "role": "runner", "action": "STATE_TRANSITION", "details": {"phase": "BASELINE", "iteration": 11}}
+{"timestamp": "2026-09-13T05:04:18.824173+00:00", "role": "runner", "action": "GATE_CLEARED", "details": {"gate": "GATE_3_PIPELINE_SMOKE"}}
+{"timestamp": "2026-09-13T05:04:18.828209+00:00", "role": "experiment_manager", "action": "STATE_TRANSITION", "details": {"phase": "HYPOTHESIS_QUEUE", "iteration": 12}}
+{"timestamp": "2026-09-13T05:04:18.881427+00:00", "role": "experiment_manager", "action": "STATE_TRANSITION", "details": {"phase": "HYPOTHESIS_QUEUE", "iteration": 12}}
+{"timestamp": "2026-09-13T05:04:18.881664+00:00", "role": "experiment_manager", "action": "GATE_CLEARED", "details": {"gate": "GATE_4_EV_COMPUTE"}}
+{"timestamp": "2026-09-13T05:04:18.883091+00:00", "role": "blender", "action": "STATE_TRANSITION", "details": {"phase": "ENSEMBLING", "iteration": 13}}
+{"timestamp": "2026-09-13T05:04:18.937139+00:00", "role": "blender", "action": "STATE_TRANSITION", "details": {"phase": "ENSEMBLING", "iteration": 13}}
+{"timestamp": "2026-09-13T05:04:18.937500+00:00", "role": "blender", "action": "GATE_CLEARED", "details": {"gate": "GATE_5_BLENDING_METRIC"}}
+{"timestamp": "2026-09-13T05:04:18.950259+00:00", "role": "artifact_analyst", "action": "STATE_TRANSITION", "details": {"phase": "PRE_SUBMISSION_AUDIT", "iteration": 14}}
+{"timestamp": "2026-09-13T05:04:18.962456+00:00", "role": "artifact_analyst", "action": "STATE_TRANSITION", "details": {"phase": "PRE_SUBMISSION_AUDIT", "iteration": 14}}
+{"timestamp": "2026-09-13T05:04:18.962680+00:00", "role": "artifact_analyst", "action": "GATE_CLEARED", "details": {"gate": "GATE_6_SUBMISSION_VETO"}}
+{"timestamp": "2026-09-13T05:04:18.967562+00:00", "role": "kaggle_executor", "action": "STATE_TRANSITION", "details": {"phase": "KAGGLE_SUBMISSION", "iteration": 15}}
+{"timestamp": "2026-09-13T05:04:18.969555+00:00", "role": "memory_curator", "action": "STATE_TRANSITION", "details": {"phase": "POSTMORTEM", "iteration": 16}}
+{"timestamp": "2026-09-13T05:04:18.971824+00:00", "role": "pipeline_completion", "action": "STATE_TRANSITION", "details": {"phase": "TERMINATED", "iteration": 16}}
+{"timestamp": "2026-09-13T05:04:32.141512+00:00", "role": "validation_architect", "action": "STATE_TRANSITION", "details": {"phase": "CV_FORMULATION", "iteration": 16}}
+{"timestamp": "2026-09-13T05:05:43.467867+00:00", "role": "leakage_compliance", "action": "STATE_TRANSITION", "details": {"phase": "LEAKAGE_AUDIT", "iteration": 17}}
+{"timestamp": "2026-09-13T05:05:51.948949+00:00", "role": "leakage_compliance", "action": "STATE_TRANSITION", "details": {"phase": "LEAKAGE_AUDIT", "iteration": 17}}
+{"timestamp": "2026-09-13T05:05:51.949514+00:00", "role": "leakage_compliance", "action": "GATE_CLEARED", "details": {"gate": "GATE_2_VALIDATION_VETO"}}
+{"timestamp": "2026-09-13T05:07:49.538416+00:00", "role": "runner", "action": "STATE_TRANSITION", "details": {"phase": "BASELINE", "iteration": 18}}
