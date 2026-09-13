@@ -47,8 +47,11 @@ class OutOfFoldTargetEncoder:
             new_col = f"te_{col}"
             encoded_col_names.append(new_col)
 
-            # Compute stats on train slice
-            stats = tr_out.groupby(col)["_temp_target"].agg(["count", "mean"])
+            s_tr = tr_out[col].astype(str)
+            s_va = va_out[col].astype(str)
+
+            # Compute stats on train slice (observed=False avoids pandas future warning)
+            stats = tr_out.groupby(s_tr, observed=False)["_temp_target"].agg(["count", "mean"])
             counts = stats["count"]
             means = stats["mean"]
 
@@ -56,9 +59,9 @@ class OutOfFoldTargetEncoder:
             mapping = smoothed.to_dict()
             self.encodings[col] = mapping
 
-            # Map to train and val
-            tr_out[new_col] = tr_out[col].map(mapping).fillna(self.global_prior).astype(float)
-            va_out[new_col] = va_out[col].map(mapping).fillna(self.global_prior).astype(float)
+            # Map to train and val as standard float series
+            tr_out[new_col] = s_tr.map(mapping).fillna(self.global_prior).astype(float)
+            va_out[new_col] = s_va.map(mapping).fillna(self.global_prior).astype(float)
 
         tr_out.drop(columns=["_temp_target"], inplace=True)
         return tr_out, va_out, encoded_col_names
@@ -74,6 +77,7 @@ class OutOfFoldTargetEncoder:
             new_col = f"te_{col}"
             encoded_col_names.append(new_col)
             mapping = self.encodings.get(col, {})
-            te_out[new_col] = te_out[col].map(mapping).fillna(self.global_prior).astype(float)
+            s_te = te_out[col].astype(str)
+            te_out[new_col] = s_te.map(mapping).fillna(self.global_prior).astype(float)
 
         return te_out, encoded_col_names

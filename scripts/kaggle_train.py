@@ -245,10 +245,16 @@ def train_and_predict(
 
     if model_name in ["lgbm", "xgboost"]:
         for c in cat_cols:
-            train_df[c] = train_df[c].astype("category")
-            test_df[c] = test_df[c].astype("category")
+            all_cats = sorted(list(
+                set(train_df[c].dropna().astype(str))
+                | set(test_df[c].dropna().astype(str))
+                | (set(orig_df[c].dropna().astype(str)) if orig_df is not None else set())
+            ))
+            cat_dtype = pd.CategoricalDtype(categories=all_cats)
+            train_df[c] = train_df[c].astype(cat_dtype)
+            test_df[c] = test_df[c].astype(cat_dtype)
             if orig_df is not None:
-                orig_df[c] = orig_df[c].astype("category")
+                orig_df[c] = orig_df[c].astype(cat_dtype)
     elif model_name == "catboost":
         for c in cat_cols:
             train_df[c] = train_df[c].astype(str)
