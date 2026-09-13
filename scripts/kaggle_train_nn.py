@@ -104,6 +104,31 @@ class TabularMLP(nn.Module):
         return self.head(feat).squeeze(-1)
 
 
+def load_data(data_dir: Path | str | None) -> tuple[pd.DataFrame, pd.DataFrame, Path]:
+    """Loads train and test with CSV and Parquet auto-discovery."""
+    resolved_dir = resolve_data_dir(data_dir)
+    print(f"[*] Ingesting data from: {resolved_dir}")
+
+    # Load Train
+    if (resolved_dir / "train.parquet").exists():
+        train_df = pl.read_parquet(resolved_dir / "train.parquet").to_pandas()
+    elif (resolved_dir / "train.csv").exists():
+        train_df = pl.read_csv(resolved_dir / "train.csv").to_pandas()
+    else:
+        raise FileNotFoundError(f"Neither train.parquet nor train.csv found in {resolved_dir}")
+
+    # Load Test
+    if (resolved_dir / "test.parquet").exists():
+        test_df = pl.read_parquet(resolved_dir / "test.parquet").to_pandas()
+    elif (resolved_dir / "test.csv").exists():
+        test_df = pl.read_csv(resolved_dir / "test.csv").to_pandas()
+    else:
+        raise FileNotFoundError(f"Neither test.parquet nor test.csv found in {resolved_dir}")
+
+    print(f"[+] Loaded train: {train_df.shape}, test: {test_df.shape}")
+    return train_df, test_df, resolved_dir
+
+
 def train_nn_model(
     data_dir: Path | None = None,
     output_dir: Path | None = None,
@@ -122,9 +147,7 @@ def train_nn_model(
     model_dir = base_out / "models" / "nn_tabular"
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    resolved_dir = resolve_data_dir(data_dir)
-    train_df = pl.read_parquet(resolved_dir / "train.parquet").to_pandas()
-    test_df = pl.read_parquet(resolved_dir / "test.parquet").to_pandas()
+    train_df, test_df, resolved_dir = load_data(data_dir)
 
     target_col = "Will_Buy_EV"
     id_col = "id"
@@ -285,6 +308,8 @@ def train_nn_model(
 
     sub_df = pd.DataFrame({"id": test_df[id_col], target_col: test_preds})
     sub_df.to_csv(model_dir / "submission.csv", index=False)
+    root_sub = Path("/kaggle/working/submission.csv") if Path("/kaggle/working").exists() else base_out / "submission.csv"
+    sub_df.to_csv(root_sub, index=False)
     print(f"[+] PyTorch Neural Net artifacts saved in: {model_dir}")
     return metrics_summary
 
