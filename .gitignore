@@ -59,3 +59,8 @@ observability/logs/*.log
 # Operating system files
 .DS_Store
 Thumbs.db
+
+# Root runtime artifacts
+*.zip
+submission.csv
+uv.lock
