@@ -221,10 +221,9 @@ def train_single_model(
 
         # Triple Target Encoding on Categoricals & Smooth Bins
         if te_cols:
-            skf_te = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-            te_auto = TargetEncoder(smooth="auto", cv=skf_te)
-            te_10 = TargetEncoder(smooth=10.0, cv=skf_te)
-            te_100 = TargetEncoder(smooth=100.0, cv=skf_te)
+            te_auto = TargetEncoder(smooth="auto", cv=n_splits, random_state=seed)
+            te_10 = TargetEncoder(smooth=10.0, cv=n_splits, random_state=seed)
+            te_100 = TargetEncoder(smooth=100.0, cv=n_splits, random_state=seed)
 
             tr_auto = te_auto.fit_transform(X_tr[te_cols], y_tr)
             va_auto = te_auto.transform(X_va[te_cols])
