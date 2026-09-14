@@ -105,6 +105,66 @@ def load_dataset(data_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[p
     return train_df, test_df, orig_df
 
 
+def find_pseudo_labels(
+    source_path: Optional[str],
+    test_ids: pd.Series,
+    conf_high: float = 0.995,
+    conf_low: float = 0.005,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Attempts to locate and load high-confidence pseudo-labels for test data.
+    Returns (pseudo_mask, pseudo_targets) or (None, None).
+    """
+    candidates = []
+    if source_path:
+        candidates.append(Path(source_path))
+
+    candidates.extend([
+        Path("/kaggle/working/submission.csv"),
+        Path("/kaggle/working/models/lgbm_grandmaster/submission.csv"),
+        PROJECT_ROOT / "submission.csv",
+        PROJECT_ROOT / "experiments" / "artifacts" / "models" / "lgbm_grandmaster" / "submission.csv",
+    ])
+
+    sub_file = None
+    for c in candidates:
+        if c.exists() and c.is_file():
+            sub_file = c
+            break
+
+    if sub_file is None:
+        print("[-] No prior test submission found for pseudo-labeling.")
+        return None, None
+
+    print(f"[+] Loading prior test predictions for pseudo-labeling: {sub_file}")
+    try:
+        if str(sub_file).endswith(".parquet"):
+            df = pl.read_parquet(sub_file).to_pandas()
+        else:
+            df = pd.read_csv(sub_file)
+
+        pred_col = TARGET if TARGET in df.columns else ("prediction" if "prediction" in df.columns else df.columns[-1])
+        if "id" in df.columns:
+            df = df.set_index("id").reindex(test_ids.values).reset_index()
+        preds = df[pred_col].values
+
+        mask_pos = preds >= conf_high
+        mask_neg = preds <= conf_low
+        mask = mask_pos | mask_neg
+        targets = np.where(mask_pos, 1, 0)
+
+        n_pos = int(mask_pos.sum())
+        n_neg = int(mask_neg.sum())
+        n_total = int(mask.sum())
+
+        print(f"[+] High-confidence pseudo-labels extracted: {n_total} samples ({n_pos} positive, {n_neg} negative)")
+        print(f"    Thresholds: >= {conf_high:.4f} (pos) | <= {conf_low:.4f} (neg) | Test coverage: {n_total / len(test_ids) * 100:.2f}%")
+        return mask, targets
+    except Exception as e:
+        print(f"[!] Warning: Failed to load pseudo-labels from {sub_file}: {e}")
+        return None, None
+
+
 def train_single_model(
     model_type: str,
     train_feat: pd.DataFrame,
@@ -116,16 +176,27 @@ def train_single_model(
     has_gpu: bool,
     output_dir: Path,
     primary_sub_path: Path,
+    pseudo_mask: Optional[np.ndarray] = None,
+    pseudo_targets: Optional[np.ndarray] = None,
+    pseudo_weight: float = 0.8,
 ) -> Tuple[float, np.ndarray, np.ndarray]:
     model_name = f"{model_type}_grandmaster"
     print(f"\n=================================================================")
     print(f"[*] TRAINING {n_splits}-FOLD GRANDMASTER: {model_name.upper()}")
     print(f"    Accelerator: {'GPU' if has_gpu else 'CPU'}")
+    pseudo_active = pseudo_mask is not None and np.sum(pseudo_mask) > 0
+    if pseudo_active:
+        print(f"    Pseudo-Labeling: ACTIVE ({np.sum(pseudo_mask)} test samples added to fold train splits, weight={pseudo_weight})")
     print(f"=================================================================")
 
     X = train_feat[features].copy()
     y = train_feat[TARGET].values
     X_test = test_feat[features].copy()
+
+    if pseudo_active:
+        X_pseudo = X_test.iloc[pseudo_mask].copy()
+        y_pseudo = pseudo_targets[pseudo_mask].copy()
+        sw_pseudo = np.full(len(y_pseudo), pseudo_weight, dtype=np.float32)
 
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
     oof_preds = np.zeros(len(X), dtype=np.float64)
@@ -136,16 +207,24 @@ def train_single_model(
     for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
         f_start = time.time()
         X_tr = X.iloc[train_idx].copy()
-        y_tr = y[train_idx]
+        y_tr = y[train_idx].copy()
         X_va = X.iloc[val_idx].copy()
-        y_va = y[val_idx]
+        y_va = y[val_idx].copy()
         X_te = X_test.copy()
+
+        if pseudo_active:
+            X_tr = pd.concat([X_tr, X_pseudo], ignore_index=True)
+            y_tr = np.concatenate([y_tr, y_pseudo])
+            sw_tr = np.concatenate([np.ones(len(train_idx), dtype=np.float32), sw_pseudo])
+        else:
+            sw_tr = None
 
         # Triple Target Encoding on Categoricals & Smooth Bins
         if te_cols:
-            te_auto = TargetEncoder(shuffle=True, cv=n_splits, smooth="auto", random_state=seed)
-            te_10 = TargetEncoder(shuffle=True, cv=n_splits, smooth=10.0, random_state=seed)
-            te_100 = TargetEncoder(shuffle=True, cv=n_splits, smooth=100.0, random_state=seed)
+            skf_te = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+            te_auto = TargetEncoder(smooth="auto", cv=skf_te)
+            te_10 = TargetEncoder(smooth=10.0, cv=skf_te)
+            te_100 = TargetEncoder(smooth=100.0, cv=skf_te)
 
             tr_auto = te_auto.fit_transform(X_tr[te_cols], y_tr)
             va_auto = te_auto.transform(X_va[te_cols])
@@ -200,6 +279,7 @@ def train_single_model(
             )
             clf.fit(
                 X_tr, y_tr,
+                sample_weight=sw_tr,
                 eval_set=[(X_va, y_va)],
                 callbacks=[
                     lgb.early_stopping(stopping_rounds=500, verbose=False),
@@ -211,20 +291,23 @@ def train_single_model(
 
         elif model_type == "catboost":
             import catboost as cb
-            clf = cb.CatBoostClassifier(
-                iterations=10000,
-                learning_rate=0.03,
-                depth=6,
-                l2_leaf_reg=4.0,
-                eval_metric="AUC",
-                random_seed=seed,
-                task_type="GPU" if has_gpu else "CPU",
-                verbose=1000,
-            )
+            cb_params = {
+                "iterations": 15000,
+                "learning_rate": 0.03,
+                "depth": 6,
+                "l2_leaf_reg": 4.0,
+                "eval_metric": "AUC",
+                "random_seed": seed,
+                "early_stopping_rounds": 500,
+                "verbose": 1000,
+            }
+            if has_gpu:
+                cb_params["task_type"] = "GPU"
+            clf = cb.CatBoostClassifier(**cb_params)
             clf.fit(
                 X_tr, y_tr,
+                sample_weight=sw_tr,
                 eval_set=(X_va, y_va),
-                early_stopping_rounds=400,
                 verbose=1000,
             )
             val_probs = clf.predict_proba(X_va)[:, 1]
@@ -232,23 +315,31 @@ def train_single_model(
 
         elif model_type == "xgboost":
             import xgboost as xgb
-            clf = xgb.XGBClassifier(
-                n_estimators=15000,
-                learning_rate=0.02,
-                max_depth=5,
-                subsample=0.8,
-                colsample_bytree=0.3,
-                reg_alpha=0.071,
-                reg_lambda=2.0,
-                max_bin=1024,
-                tree_method="hist",
-                device="cuda" if has_gpu else "cpu",
-                eval_metric="auc",
-                early_stopping_rounds=500,
-                random_state=seed,
-            )
+            xgb_params = {
+                "n_estimators": 15000,
+                "learning_rate": 0.02,
+                "max_depth": 5,
+                "subsample": 0.8,
+                "colsample_bytree": 0.3,
+                "reg_alpha": 0.071,
+                "reg_lambda": 2.0,
+                "max_bin": 1024,
+                "eval_metric": "auc",
+                "early_stopping_rounds": 500,
+                "random_state": seed,
+                "n_jobs": -1,
+            }
+            if has_gpu:
+                xgb_params["tree_method"] = "hist"
+                xgb_params["device"] = "cuda"
+            else:
+                xgb_params["tree_method"] = "hist"
+                xgb_params["device"] = "cpu"
+
+            clf = xgb.XGBClassifier(**xgb_params)
             clf.fit(
                 X_tr, y_tr,
+                sample_weight=sw_tr,
                 eval_set=[(X_va, y_va)],
                 verbose=1000,
             )
@@ -310,7 +401,7 @@ def blend_grandmaster_models(
     from scipy.stats import rankdata
 
     print(f"\n======================================================================")
-    print(f"[*] EXECUTING GRANDMASTER DUAL OPTIMIZED BLEND (PROBABILITY + RANK)")
+    print(f"[*] EXECUTING GRANDMASTER TRIPLE OPTIMIZED BLEND (PROB + RANK + LOGIT)")
     print(f"======================================================================")
     model_names = list(models_oof.keys())
     m = len(model_names)
@@ -321,9 +412,8 @@ def blend_grandmaster_models(
     oof_matrix = np.column_stack([models_oof[k] for k in model_names])
     test_matrix = np.column_stack([models_test[k] for k in model_names])
 
-    # Rank-normalized matrices (percentile ranks scaled to [0, 1])
-    oof_rank_matrix = np.column_stack([rankdata(models_oof[k]) / len(y_true) for k in model_names])
-    test_rank_matrix = np.column_stack([rankdata(models_test[k]) / len(test_ids) for k in model_names])
+    init_w = np.ones(m) / m
+    best_single_auc = max(roc_auc_score(y_true, models_oof[k]) for k in model_names)
 
     # Method 1: Probability Space Nelder-Mead
     def loss_prob(weights):
@@ -334,13 +424,12 @@ def blend_grandmaster_models(
         blend = np.dot(oof_matrix, w)
         return -roc_auc_score(y_true, blend)
 
-    init_w = np.ones(m) / m
     res_prob = minimize(
         loss_prob,
         init_w,
         method="Nelder-Mead",
         bounds=[(0.0, 1.0)] * m,
-        options={"maxiter": 500, "disp": False},
+        options={"maxiter": 600, "disp": False},
     )
     raw_w_prob = np.clip(res_prob.x, 0.0, None)
     best_w_prob = raw_w_prob / np.sum(raw_w_prob)
@@ -348,6 +437,9 @@ def blend_grandmaster_models(
     auc_prob = roc_auc_score(y_true, blend_oof_prob)
 
     # Method 2: Rank Space Nelder-Mead
+    oof_rank_matrix = np.column_stack([rankdata(models_oof[k]) / len(y_true) for k in model_names])
+    test_rank_matrix = np.column_stack([rankdata(models_test[k]) / len(test_ids) for k in model_names])
+
     def loss_rank(weights):
         w = np.array(weights)
         if np.sum(np.abs(w)) == 0:
@@ -361,27 +453,59 @@ def blend_grandmaster_models(
         init_w,
         method="Nelder-Mead",
         bounds=[(0.0, 1.0)] * m,
-        options={"maxiter": 500, "disp": False},
+        options={"maxiter": 600, "disp": False},
     )
     raw_w_rank = np.clip(res_rank.x, 0.0, None)
     best_w_rank = raw_w_rank / np.sum(raw_w_rank)
     blend_oof_rank = np.dot(oof_rank_matrix, best_w_rank)
     auc_rank = roc_auc_score(y_true, blend_oof_rank)
 
-    best_single_auc = max(roc_auc_score(y_true, models_oof[k]) for k in model_names)
+    # Method 3: Logit (Log-Odds) Space Nelder-Mead
+    eps = 1e-7
+    clip_oof = np.clip(oof_matrix, eps, 1.0 - eps)
+    oof_logit_matrix = np.log(clip_oof / (1.0 - clip_oof))
+    clip_test = np.clip(test_matrix, eps, 1.0 - eps)
+    test_logit_matrix = np.log(clip_test / (1.0 - clip_test))
 
-    if auc_rank > auc_prob:
-        chosen_method = "rank_space_nelder_mead"
-        best_weights = best_w_rank
+    def loss_logit(weights):
+        w = np.array(weights)
+        if np.sum(np.abs(w)) == 0:
+            return 0.0
+        w = w / np.sum(w)
+        blend_logit = np.dot(oof_logit_matrix, w)
+        blend_prob = 1.0 / (1.0 + np.exp(-np.clip(blend_logit, -35.0, 35.0)))
+        return -roc_auc_score(y_true, blend_prob)
+
+    res_logit = minimize(
+        loss_logit,
+        init_w,
+        method="Nelder-Mead",
+        bounds=[(0.0, 1.0)] * m,
+        options={"maxiter": 600, "disp": False},
+    )
+    raw_w_logit = np.clip(res_logit.x, 0.0, None)
+    best_w_logit = raw_w_logit / np.sum(raw_w_logit)
+    blend_oof_logit = 1.0 / (1.0 + np.exp(-np.clip(np.dot(oof_logit_matrix, best_w_logit), -35.0, 35.0)))
+    auc_logit = roc_auc_score(y_true, blend_oof_logit)
+
+    # Comparison and Tournament Selection
+    candidates = [
+        ("logit_space_nelder_mead", auc_logit, best_w_logit),
+        ("rank_space_nelder_mead", auc_rank, best_w_rank),
+        ("prob_space_nelder_mead", auc_prob, best_w_prob),
+    ]
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    chosen_method, final_auc, best_weights = candidates[0]
+
+    if chosen_method == "logit_space_nelder_mead":
+        blend_test = 1.0 / (1.0 + np.exp(-np.clip(np.dot(test_logit_matrix, best_weights), -35.0, 35.0)))
+        blend_oof = blend_oof_logit
+    elif chosen_method == "rank_space_nelder_mead":
+        blend_test = np.dot(test_rank_matrix, best_weights)
         blend_oof = blend_oof_rank
-        blend_test = np.dot(test_rank_matrix, best_w_rank)
-        final_auc = auc_rank
     else:
-        chosen_method = "prob_space_nelder_mead"
-        best_weights = best_w_prob
+        blend_test = np.dot(test_matrix, best_weights)
         blend_oof = blend_oof_prob
-        blend_test = np.dot(test_matrix, best_w_prob)
-        final_auc = auc_prob
 
     weights_dict = {model_names[i]: float(best_weights[i]) for i in range(m)}
     delta_auc = final_auc - best_single_auc
@@ -389,10 +513,11 @@ def blend_grandmaster_models(
     print(f"[+] Method Comparison:")
     print(f"    - Probability Blend AUC: {auc_prob:.6f}")
     print(f"    - Rank-Weighted Blend AUC: {auc_rank:.6f}")
-    print(f"[+] Chosen Strategy:        {chosen_method.upper()}")
-    print(f"[+] Optimal Blend Weights:  {weights_dict}")
-    print(f"[+] Best Single Model AUC:  {best_single_auc:.6f}")
-    print(f"[+] Ensembled Grandmaster:  {final_auc:.6f} (Δ: {delta_auc:+.6f})")
+    print(f"    - Logit-Space Blend AUC:  {auc_logit:.6f}")
+    print(f"[+] Champion Strategy:     {chosen_method.upper()}")
+    print(f"[+] Optimal Blend Weights: {weights_dict}")
+    print(f"[+] Best Single Model AUC: {best_single_auc:.6f}")
+    print(f"[+] Ensembled Grandmaster: {final_auc:.6f} (Δ: {delta_auc:+.6f})")
 
     # Save ensemble artifacts
     ensemble_dir = output_dir.parent / "ensemble_grandmaster"
@@ -402,10 +527,16 @@ def blend_grandmaster_models(
     blend_sub.to_csv(ensemble_dir / "submission.csv", index=False)
     blend_sub.to_csv(primary_sub_path, index=False)
 
+    blend_oof_df = pd.DataFrame({"id": range(len(blend_oof)), "oof_pred": blend_oof, "target": y_true})
+    blend_oof_df.to_parquet(ensemble_dir / "oof_preds.parquet", index=False)
+
     meta = {
         "ensemble_type": chosen_method,
         "models": model_names,
         "weights": weights_dict,
+        "auc_prob": float(auc_prob),
+        "auc_rank": float(auc_rank),
+        "auc_logit": float(auc_logit),
         "best_single_auc": float(best_single_auc),
         "ensemble_auc": float(final_auc),
         "delta_auc": float(delta_auc),
@@ -422,6 +553,11 @@ def main():
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42, help="Primary random seed")
     parser.add_argument("--seeds", nargs="+", type=int, default=None, help="List of seeds for multi-seed averaging (e.g. --seeds 42 2024 777)")
+    parser.add_argument("--pseudo-label", action="store_true", help="Enable high-confidence pseudo-labeling from test predictions")
+    parser.add_argument("--pseudo-source", type=str, default=None, help="Path to prior test submission/predictions for pseudo-labeling")
+    parser.add_argument("--pseudo-conf-high", type=float, default=0.995, help="High confidence threshold (positive)")
+    parser.add_argument("--pseudo-conf-low", type=float, default=0.005, help="Low confidence threshold (negative)")
+    parser.add_argument("--pseudo-weight", type=float, default=0.8, help="Sample weight for pseudo-labeled points")
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--sub-path", type=str, default=None)
     args = parser.parse_args()
@@ -443,6 +579,15 @@ def main():
     print("[*] Generating Grandmaster Features (Digit Decomposition, Smooth Keys, Hard Boundaries)...")
     train_feat, test_feat, features, te_cols = build_grandmaster_features(train_df, test_df, orig_df)
     print(f"[+] Feature generation complete. Total features: {len(features)} | Target-encode cols: {len(te_cols)}")
+
+    pseudo_mask, pseudo_targets = None, None
+    if args.pseudo_label:
+        pseudo_mask, pseudo_targets = find_pseudo_labels(
+            source_path=args.pseudo_source,
+            test_ids=test_feat["id"],
+            conf_high=args.pseudo_conf_high,
+            conf_low=args.pseudo_conf_low,
+        )
 
     seeds = args.seeds if args.seeds else [args.seed]
     models_to_run = ["lgbm", "catboost", "xgboost"] if args.model == "all" else [args.model]
@@ -466,6 +611,9 @@ def main():
                 has_gpu=has_gpu,
                 output_dir=output_dir,
                 primary_sub_path=sub_path,
+                pseudo_mask=pseudo_mask,
+                pseudo_targets=pseudo_targets,
+                pseudo_weight=args.pseudo_weight,
             )
             seed_oofs.append(oof)
             seed_tests.append(test_p)

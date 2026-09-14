@@ -85,6 +85,39 @@ def build_grandmaster_features(
         combined["Environmental_Concern_Level"].astype(float) / (anx_val + 0.5)
     ).values
 
+    # Continuous Financial & Commute Dynamics
+    income_val = combined["Annual_Income_USD"].astype(float)
+    commute_val = combined["Daily_Commute_km"].astype(float)
+    age_val = combined["Age"].astype(float)
+
+    new_features["feat_income_per_age"] = (income_val / (age_val + 1.0)).values
+    new_features["feat_income_per_commute"] = (income_val / (commute_val + 1.0)).values
+    new_features["feat_commute_per_age"] = (commute_val / (age_val + 1.0)).values
+    new_features["feat_charging_density_diff"] = (
+        combined["Charging_Stations_Near_Home"].astype(float)
+        - combined["Charging_Stations_Near_Work"].astype(float)
+    ).values
+    new_features["feat_charging_home_work_ratio"] = (
+        (combined["Charging_Stations_Near_Home"].astype(float) + 1.0)
+        / (combined["Charging_Stations_Near_Work"].astype(float) + 1.0)
+    ).values
+
+    # Quantization Artifacts & Decimal Residues
+    new_features["is_commute_exact_int"] = ((commute_val % 1.0 == 0.0)).astype("int8").values
+    new_features["commute_fraction"] = (commute_val % 1.0).astype("float32").values
+
+    # Compound Interaction Categoricals
+    if "City_Type" in combined.columns and "Home_Charging_Possible" in combined.columns:
+        combined["cat_city_home_charging"] = combined["City_Type"].astype(str) + "_" + combined["Home_Charging_Possible"].astype(str)
+    if "City_Type" in combined.columns and "Subsidy_Available" in combined.columns:
+        combined["cat_city_subsidy"] = combined["City_Type"].astype(str) + "_" + combined["Subsidy_Available"].astype(str)
+    if "Home_Charging_Possible" in combined.columns and "Range_Anxiety_Level" in combined.columns:
+        combined["cat_charging_anxiety"] = combined["Home_Charging_Possible"].astype(str) + "_" + combined["Range_Anxiety_Level"].astype(str)
+    if "Current_Car_Type" in combined.columns and "Subsidy_Available" in combined.columns:
+        combined["cat_car_subsidy"] = combined["Current_Car_Type"].astype(str) + "_" + combined["Subsidy_Available"].astype(str)
+    if "Gender" in combined.columns and "City_Type" in combined.columns:
+        combined["cat_gender_city"] = combined["Gender"].astype(str) + "_" + combined["City_Type"].astype(str)
+
     # Drop Number_of_Cars_Owned (verified zero predictive gain in high-scoring models)
     combined.drop(columns=["Number_of_Cars_Owned"], inplace=True, errors="ignore")
 
@@ -155,7 +188,9 @@ def build_grandmaster_features(
     new_features["income100_floor"] = np.floor(income / 100.0).astype(str).values
     new_features["income1000_floor"] = np.floor(income / 1000.0).astype(str).values
     new_features["commute_integer"] = np.floor(combined["Daily_Commute_km"]).astype(str).values
-    all_cats.extend(["income_exact_int", "income100_floor", "income1000_floor", "commute_integer"])
+    new_features["commute_10km_floor"] = np.floor(combined["Daily_Commute_km"] / 10.0).astype(str).values
+    new_features["age_decade_floor"] = np.floor(combined["Age"] / 10.0).astype(str).values
+    all_cats.extend(["income_exact_int", "income100_floor", "income1000_floor", "commute_integer", "commute_10km_floor", "age_decade_floor"])
 
     # Concat all new features in one single operation (zero fragmentation)
     new_features_df = pd.DataFrame(new_features, index=combined.index)
@@ -188,6 +223,7 @@ def build_grandmaster_features(
         test_feat.drop(columns=drop_cols, inplace=True, errors="ignore")
 
     features = [c for c in test_feat.columns if c != "id"]
-    target_encode_cols = [c for c in all_cats if c not in drop_set and c in test_feat.columns]
+    non_numeric_cols = [c for c in features if not pd.api.types.is_numeric_dtype(test_feat[c])]
+    target_encode_cols = sorted(list(set([c for c in all_cats if c not in drop_set and c in test_feat.columns]).union(set(non_numeric_cols))))
 
     return train_feat, test_feat, features, target_encode_cols
