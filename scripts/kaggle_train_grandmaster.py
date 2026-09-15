@@ -12,6 +12,7 @@ Implements the 0.9463+ synthetic artifact exploit pipeline:
 """
 
 import argparse
+import gc
 import json
 import os
 from pathlib import Path
