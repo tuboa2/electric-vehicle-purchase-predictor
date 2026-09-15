@@ -113,6 +113,13 @@ def build_grandmaster_features(
     new_features["feat_charging_home_city_diff"] = (home_charging - city_home_mean).values
     new_features["feat_charging_work_city_diff"] = (work_charging - city_work_mean).values
 
+    # Chris Deotte Simpson's Paradox Resolution (Home Charging Ability vs Station Density)
+    mean_home_by_ability_city = combined.groupby(["Home_Charging_Possible", "City_Type"], observed=False)["Charging_Stations_Near_Home"].transform("mean")
+    new_features["feat_charging_home_simpson_diff"] = (home_charging - mean_home_by_ability_city).astype("float32").values
+    can_charge_bin = (combined["Home_Charging_Possible"] == "Yes").astype("float32")
+    new_features["feat_home_charge_ability_x_stations"] = (can_charge_bin * home_charging).astype("float32").values
+    new_features["feat_no_home_charge_x_stations"] = ((1.0 - can_charge_bin) * home_charging).astype("float32").values
+
     anxiety_map = {"Low": 1.0, "Medium": 2.0, "High": 3.0}
     anx_val = combined["Range_Anxiety_Level"].map(anxiety_map).fillna(1.0).astype(float)
     new_features["feat_env_anxiety_ratio"] = (
@@ -148,14 +155,26 @@ def build_grandmaster_features(
     cat_cols = [c for c in cat_cols if c not in ["id", "is_train", TARGET]]
     num_cols = [c for c in combined.columns if c not in cat_cols + ["id", "is_train", TARGET]]
 
-    # 1. Digit Decomposition (Extract digits from 10^-4 to 10^3)
+    # 1. Exact Float-Safe Digit Decomposition (eliminates IEEE 754 precision noise)
     digit_feature_names = []
-    for c in num_cols:
-        col_series = combined[c].fillna(0)
-        for k in range(-4, 4):
-            col_name = f"{c}_digit{k}"
-            new_features[col_name] = ((col_series // (10**k)) % 10).astype("int8").values
-            digit_feature_names.append(col_name)
+    continuous_to_decompose = [
+        "Annual_Income_USD",
+        "Daily_Commute_km",
+        "Age",
+        "Charging_Stations_Near_Home",
+        "Charging_Stations_Near_Work",
+    ]
+    for c in continuous_to_decompose:
+        if c in combined.columns:
+            col_series = combined[c].fillna(0).astype(float)
+            for k in range(0, 5):
+                col_name = f"{c}_d10p{k}"
+                new_features[col_name] = ((np.floor(col_series) // (10**k)) % 10).astype("int8").values
+                digit_feature_names.append(col_name)
+            for k in range(1, 4):
+                col_name = f"{c}_d10m{k}"
+                new_features[col_name] = (np.floor(np.round(col_series * (10**k), 4)) % 10).astype("int8").values
+                digit_feature_names.append(col_name)
 
     all_num_cols = list(num_cols) + digit_feature_names
 
@@ -167,30 +186,43 @@ def build_grandmaster_features(
                 orig[TARGET] = orig[TARGET].astype(str).map({"Yes": 1, "No": 0, "1": 1, "0": 0}).fillna(0).astype(float)
         orig_global_mean = float(orig[TARGET].mean())
 
-        for col in cat_cols + all_num_cols:
+        for col in cat_cols + num_cols:
             if col in orig.columns:
                 real_world_stats = orig.groupby(col, observed=False)[TARGET].mean()
                 if col in combined.columns:
                     col_data = combined[col]
-                else:
+                elif col in new_features:
                     col_data = pd.Series(new_features[col], index=combined.index)
+                else:
+                    continue
                 new_features[f"{col}_org_mean"] = (
                     col_data.map(real_world_stats).fillna(orig_global_mean).astype(float).values
                 )
 
-    # 3. Convert Numerics to String Categories for Frequency and Target Encoding
-    num_to_cat_cols = []
-    for col in all_num_cols:
-        cat_name = f"{col}_cat"
-        if col in combined.columns:
-            cat_series = combined[col].fillna("NaN").astype(str)
-        else:
-            cat_series = pd.Series(new_features[col], index=combined.index).fillna("NaN").astype(str)
-        new_features[cat_name] = cat_series.values
-        num_to_cat_cols.append(cat_name)
+    # 3. Hard Edge / Magic Boundary Flags
+    income = combined["Annual_Income_USD"]
+    new_features["is_30k_spike"] = (income == 30000.0).astype("int8").values
+    new_features["is_millionaire_cliff"] = (income >= 170537.0).astype("int8").values
+    new_features["is_dead_zone"] = ((income >= 38000.0) & (income <= 42000.0)).astype("int8").values
+    new_features["is_env_hater"] = (combined["Environmental_Concern_Level"] == 1).astype("int8").values
 
-    # 4. Global Frequency Encoding
-    all_cats = list(cat_cols) + list(num_to_cat_cols)
+    # 4. Smooth Keys (Binned Numerics)
+    new_features["income_exact_int"] = np.floor(income).astype(str).values
+    new_features["income100_floor"] = np.floor(income / 100.0).astype(str).values
+    new_features["income1000_floor"] = np.floor(income / 1000.0).astype(str).values
+    new_features["commute_integer"] = np.floor(combined["Daily_Commute_km"]).astype(str).values
+    new_features["commute_10km_floor"] = np.floor(combined["Daily_Commute_km"] / 10.0).astype(str).values
+    new_features["age_decade_floor"] = np.floor(combined["Age"] / 10.0).astype(str).values
+
+    # 5. Global Frequency Encoding on High-Signal Categoricals & Bins (excluding raw single digits)
+    all_cats = list(cat_cols) + [
+        "income_exact_int",
+        "income100_floor",
+        "income1000_floor",
+        "commute_integer",
+        "commute_10km_floor",
+        "age_decade_floor",
+    ]
     for col in all_cats:
         if col in combined.columns:
             val_series = combined[col]
@@ -198,22 +230,6 @@ def build_grandmaster_features(
             val_series = pd.Series(new_features[col], index=combined.index)
         freq_mapping = val_series.value_counts(normalize=True).to_dict()
         new_features[f"{col}_fe"] = val_series.map(freq_mapping).astype(float).fillna(0.0).values
-
-    # 5. Hard Edge / Magic Boundary Flags
-    income = combined["Annual_Income_USD"]
-    new_features["is_30k_spike"] = (income == 30000.0).astype("int8").values
-    new_features["is_millionaire_cliff"] = (income >= 170537.0).astype("int8").values
-    new_features["is_dead_zone"] = ((income >= 38000.0) & (income <= 42000.0)).astype("int8").values
-    new_features["is_env_hater"] = (combined["Environmental_Concern_Level"] == 1).astype("int8").values
-
-    # 6. Smooth Keys (Binned Numerics)
-    new_features["income_exact_int"] = np.floor(income).astype(str).values
-    new_features["income100_floor"] = np.floor(income / 100.0).astype(str).values
-    new_features["income1000_floor"] = np.floor(income / 1000.0).astype(str).values
-    new_features["commute_integer"] = np.floor(combined["Daily_Commute_km"]).astype(str).values
-    new_features["commute_10km_floor"] = np.floor(combined["Daily_Commute_km"] / 10.0).astype(str).values
-    new_features["age_decade_floor"] = np.floor(combined["Age"] / 10.0).astype(str).values
-    all_cats.extend(["income_exact_int", "income100_floor", "income1000_floor", "commute_integer", "commute_10km_floor", "age_decade_floor"])
 
     # Concat all new features in one single operation (zero fragmentation)
     new_features_df = pd.DataFrame(new_features, index=combined.index)

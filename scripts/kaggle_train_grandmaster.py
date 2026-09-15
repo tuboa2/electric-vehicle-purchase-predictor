@@ -345,14 +345,15 @@ def train_single_model(
             lgb_params = {
                 "objective": "binary",
                 "metric": "auc",
-                "learning_rate": 0.035,
-                "max_depth": 5,
-                "num_leaves": 32,
-                "min_child_samples": 10,
+                "learning_rate": 0.025,
+                "max_depth": 6,
+                "num_leaves": 63,
+                "min_child_samples": 20,
                 "subsample": 0.8,
-                "colsample_bytree": 0.3,
-                "reg_alpha": 0.071,
-                "reg_lambda": 2.0,
+                "subsample_freq": 1,
+                "colsample_bytree": 0.4,
+                "reg_alpha": 0.05,
+                "reg_lambda": 2.5,
                 "max_bin": 512,
                 "random_state": seed,
                 "n_jobs": 4,
@@ -412,12 +413,12 @@ def train_single_model(
                 "eval_metric": "auc",
                 "tree_method": "hist",
                 "device": "cuda" if has_gpu else "cpu",
-                "learning_rate": 0.035,
-                "max_depth": 5,
+                "learning_rate": 0.025,
+                "max_depth": 6,
                 "subsample": 0.8,
-                "colsample_bytree": 0.3,
-                "reg_alpha": 0.071,
-                "reg_lambda": 2.0,
+                "colsample_bytree": 0.4,
+                "reg_alpha": 0.05,
+                "reg_lambda": 2.5,
                 "max_bin": 512,
                 "seed": seed,
                 "nthread": 4,
@@ -447,7 +448,7 @@ def train_single_model(
     overall_auc = roc_auc_score(train_feat[TARGET].values, oof_preds)
     duration = time.time() - start_time
     print(f"=================================================================")
-    print(f"[+] OVERALL 5-FOLD OOF ROC-AUC: {overall_auc:.6f}")
+    print(f"[+] OVERALL {n_splits}-FOLD OOF ROC-AUC: {overall_auc:.6f}")
     print(f"[+] Total training duration: {duration:.1f}s ({duration/60:.2f} min)")
     print(f"=================================================================")
 
@@ -647,9 +648,9 @@ def blend_grandmaster_models(
 def main():
     parser = argparse.ArgumentParser(description="Grandmaster EV Purchase Training")
     parser.add_argument("--model", type=str, choices=["lgbm", "catboost", "xgboost", "dual", "all"], default="dual")
-    parser.add_argument("--folds", type=int, default=5)
+    parser.add_argument("--folds", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42, help="Primary random seed")
-    parser.add_argument("--seeds", nargs="+", type=int, default=None, help="List of seeds for multi-seed averaging (e.g. --seeds 42 2024 777)")
+    parser.add_argument("--seeds", nargs="+", type=int, default=[42, 2024, 777, 1337, 9999], help="List of seeds for multi-seed averaging")
     parser.add_argument("--pseudo-label", action="store_true", help="Enable high-confidence pseudo-labeling from test predictions")
     parser.add_argument("--pseudo-source", type=str, default=None, help="Path to prior test submission/predictions for pseudo-labeling")
     parser.add_argument("--pseudo-conf-high", type=float, default=0.995, help="High confidence threshold (positive)")
