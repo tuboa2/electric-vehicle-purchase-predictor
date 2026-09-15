@@ -149,3 +149,65 @@ def test_grandmaster_triple_blend_nelder_mead(tmp_path):
     assert len(sub_df) == n
     assert TARGET in sub_df.columns
     assert (tmp_path / "ensemble_grandmaster" / "metrics.json").exists()
+
+
+def test_train_single_model_smoke(tmp_path):
+    """Verify train_single_model runs end-to-end without NameError or missing variables."""
+    from scripts.kaggle_train_grandmaster import train_single_model, prepare_seed_folds
+
+    np.random.seed(42)
+    n = 100
+    data = {
+        "id": range(n),
+        "Age": np.random.randint(18, 70, size=n),
+        "Annual_Income_USD": np.random.randint(20000, 150000, size=n),
+        "Daily_Commute_km": np.random.uniform(5.0, 100.0, size=n),
+        "Environmental_Concern_Level": np.random.randint(1, 5, size=n),
+        "Subsidy_Available": np.random.choice(["Yes", "No"], size=n),
+        "Range_Anxiety_Level": np.random.choice(["Low", "High"], size=n),
+        "City_Type": np.random.choice(["Urban", "Rural"], size=n),
+        "Current_Car_Type": np.random.choice(["SUV", "Sedan"], size=n),
+        "Home_Charging_Possible": np.random.choice(["Yes", "No"], size=n),
+        "Charging_Stations_Near_Home": np.random.randint(0, 10, size=n),
+        "Charging_Stations_Near_Work": np.random.randint(0, 10, size=n),
+        TARGET: np.random.choice([0, 1], size=n),
+    }
+    train_df = pd.DataFrame(data)
+    test_df = train_df.drop(columns=[TARGET]).copy()
+    test_df["id"] = range(n, 2 * n)
+
+    from features.grandmaster_features import build_grandmaster_features
+    tr_feat, te_feat, features, te_cols = build_grandmaster_features(train_df, test_df)
+
+    out_dir = tmp_path / "models"
+    primary_sub = tmp_path / "submission.csv"
+
+    # Test with prepared_folds
+    cached_folds = prepare_seed_folds(
+        train_feat=tr_feat,
+        test_feat=te_feat,
+        features=features,
+        te_cols=te_cols,
+        n_splits=2,
+        seed=42,
+    )
+
+    auc, oof, test_p = train_single_model(
+        model_type="lgbm",
+        train_feat=tr_feat,
+        test_feat=te_feat,
+        features=features,
+        te_cols=te_cols,
+        n_splits=2,
+        seed=42,
+        has_gpu=False,
+        output_dir=out_dir,
+        primary_sub_path=primary_sub,
+        prepared_folds=cached_folds,
+    )
+
+    assert len(oof) == n
+    assert len(test_p) == n
+    assert (out_dir / "lgbm_grandmaster" / "oof_preds.parquet").exists()
+    assert (out_dir / "lgbm_grandmaster" / "submission.csv").exists()
+

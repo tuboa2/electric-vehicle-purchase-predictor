@@ -311,6 +311,7 @@ def train_single_model(
             pseudo_weight=pseudo_weight,
         )
 
+    y = train_feat[TARGET].values
     oof_preds = np.zeros(len(train_feat), dtype=np.float64)
     test_preds = np.zeros(len(test_feat), dtype=np.float64)
 
