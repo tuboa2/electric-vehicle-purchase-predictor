@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 import sys
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -165,29 +165,24 @@ def find_pseudo_labels(
         return None, None
 
 
-def train_single_model(
-    model_type: str,
+def prepare_seed_folds(
     train_feat: pd.DataFrame,
     test_feat: pd.DataFrame,
     features: List[str],
     te_cols: List[str],
     n_splits: int,
     seed: int,
-    has_gpu: bool,
-    output_dir: Path,
-    primary_sub_path: Path,
     pseudo_mask: Optional[np.ndarray] = None,
     pseudo_targets: Optional[np.ndarray] = None,
     pseudo_weight: float = 0.8,
-) -> Tuple[float, np.ndarray, np.ndarray]:
-    model_name = f"{model_type}_grandmaster"
-    print(f"\n=================================================================")
-    print(f"[*] TRAINING {n_splits}-FOLD GRANDMASTER: {model_name.upper()}")
-    print(f"    Accelerator: {'GPU' if has_gpu else 'CPU'}")
+) -> List[Dict[str, Any]]:
+    """
+    Precomputes & caches Target-Encoded fold matrices once per random seed.
+    Eliminates redundant CPU encoding across models, downcasting to float32 (zero OOM risk).
+    """
+    print(f"\n[*] Pre-computing & Caching {n_splits}-Fold Encodings for Seed {seed}...")
+    start_t = time.time()
     pseudo_active = pseudo_mask is not None and np.sum(pseudo_mask) > 0
-    if pseudo_active:
-        print(f"    Pseudo-Labeling: ACTIVE ({np.sum(pseudo_mask)} test samples added to fold train splits, weight={pseudo_weight})")
-    print(f"=================================================================")
 
     X = train_feat[features].copy()
     y = train_feat[TARGET].values
@@ -199,13 +194,10 @@ def train_single_model(
         sw_pseudo = np.full(len(y_pseudo), pseudo_weight, dtype=np.float32)
 
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    oof_preds = np.zeros(len(X), dtype=np.float64)
-    test_preds = np.zeros(len(X_test), dtype=np.float64)
-
-    start_time = time.time()
+    folds_data = []
 
     for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
-        f_start = time.time()
+        f_t0 = time.time()
         X_tr = X.iloc[train_idx].copy()
         y_tr = y[train_idx].copy()
         X_va = X.iloc[val_idx].copy()
@@ -219,7 +211,6 @@ def train_single_model(
         else:
             sw_tr = None
 
-        # Triple Target Encoding on Categoricals & Smooth Bins
         if te_cols:
             te_auto = TargetEncoder(smooth="auto", cv=n_splits, random_state=seed)
             te_10 = TargetEncoder(smooth=10.0, cv=n_splits, random_state=seed)
@@ -257,11 +248,89 @@ def train_single_model(
             X_va = pd.concat([X_va.drop(columns=te_cols), pd.DataFrame(te_data_va, index=X_va.index)], axis=1)
             X_te = pd.concat([X_te.drop(columns=te_cols), pd.DataFrame(te_data_te, index=X_te.index)], axis=1)
 
+        # Downcast float64 to float32 to enforce strict RAM bound (<1.5 GB total)
+        f64_tr = X_tr.select_dtypes(include=["float64"]).columns
+        if len(f64_tr) > 0:
+            X_tr[f64_tr] = X_tr[f64_tr].astype("float32")
+            X_va[f64_tr] = X_va[f64_tr].astype("float32")
+            X_te[f64_tr] = X_te[f64_tr].astype("float32")
+
+        folds_data.append({
+            "fold": fold,
+            "X_tr": X_tr,
+            "y_tr": y_tr,
+            "sw_tr": sw_tr,
+            "X_va": X_va,
+            "y_va": y_va,
+            "X_te": X_te,
+            "val_idx": val_idx,
+        })
+        print(f"  [Fold {fold}/{n_splits} Encoded] ({time.time() - f_t0:.1f}s) | Fold RAM: {X_tr.memory_usage().sum() / 1e6:.1f} MB")
+
+    print(f"[+] All {n_splits} folds pre-encoded in {time.time() - start_t:.1f}s. Models will train at MAX speed without re-encoding.")
+    gc.collect()
+    return folds_data
+
+
+def train_single_model(
+    model_type: str,
+    train_feat: pd.DataFrame,
+    test_feat: pd.DataFrame,
+    features: List[str],
+    te_cols: List[str],
+    n_splits: int,
+    seed: int,
+    has_gpu: bool,
+    output_dir: Path,
+    primary_sub_path: Path,
+    pseudo_mask: Optional[np.ndarray] = None,
+    pseudo_targets: Optional[np.ndarray] = None,
+    pseudo_weight: float = 0.8,
+    prepared_folds: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[float, np.ndarray, np.ndarray]:
+    model_name = f"{model_type}_grandmaster"
+    print(f"\n=================================================================")
+    print(f"[*] TRAINING {n_splits}-FOLD GRANDMASTER: {model_name.upper()}")
+    print(f"    Accelerator: {'GPU' if has_gpu else 'CPU'}")
+    pseudo_active = pseudo_mask is not None and np.sum(pseudo_mask) > 0
+    if pseudo_active:
+        print(f"    Pseudo-Labeling: ACTIVE ({np.sum(pseudo_mask)} test samples added to fold train splits, weight={pseudo_weight})")
+    print(f"=================================================================")
+
+    if prepared_folds is None:
+        prepared_folds = prepare_seed_folds(
+            train_feat=train_feat,
+            test_feat=test_feat,
+            features=features,
+            te_cols=te_cols,
+            n_splits=n_splits,
+            seed=seed,
+            pseudo_mask=pseudo_mask,
+            pseudo_targets=pseudo_targets,
+            pseudo_weight=pseudo_weight,
+        )
+
+    oof_preds = np.zeros(len(train_feat), dtype=np.float64)
+    test_preds = np.zeros(len(test_feat), dtype=np.float64)
+
+    start_time = time.time()
+
+    for f_info in prepared_folds:
+        fold = f_info["fold"]
+        f_start = time.time()
+        X_tr = f_info["X_tr"]
+        y_tr = f_info["y_tr"]
+        sw_tr = f_info["sw_tr"]
+        X_va = f_info["X_va"]
+        y_va = f_info["y_va"]
+        X_te = f_info["X_te"]
+        val_idx = f_info["val_idx"]
+
         if model_type == "lgbm":
             import lightgbm as lgb
             clf = lgb.LGBMClassifier(
-                n_estimators=20000,
-                learning_rate=0.02,
+                n_estimators=10000,
+                learning_rate=0.035,
                 max_depth=5,
                 num_leaves=32,
                 min_child_samples=10,
@@ -269,11 +338,11 @@ def train_single_model(
                 colsample_bytree=0.3,
                 reg_alpha=0.071,
                 reg_lambda=2.0,
-                max_bin=1024,
+                max_bin=512,
                 random_state=seed,
                 feature_pre_filter=False,
                 metric="auc",
-                n_jobs=-1,
+                n_jobs=4,
                 verbose=-1,
             )
             clf.fit(
@@ -281,7 +350,7 @@ def train_single_model(
                 sample_weight=sw_tr,
                 eval_set=[(X_va, y_va)],
                 callbacks=[
-                    lgb.early_stopping(stopping_rounds=500, verbose=False),
+                    lgb.early_stopping(stopping_rounds=300, verbose=False),
                     lgb.log_evaluation(period=1000),
                 ],
             )
@@ -291,13 +360,13 @@ def train_single_model(
         elif model_type == "catboost":
             import catboost as cb
             cb_params = {
-                "iterations": 15000,
-                "learning_rate": 0.03,
+                "iterations": 8000,
+                "learning_rate": 0.04,
                 "depth": 6,
                 "l2_leaf_reg": 4.0,
                 "eval_metric": "AUC",
                 "random_seed": seed,
-                "early_stopping_rounds": 500,
+                "early_stopping_rounds": 300,
                 "verbose": 1000,
             }
             if has_gpu:
@@ -315,18 +384,18 @@ def train_single_model(
         elif model_type == "xgboost":
             import xgboost as xgb
             xgb_params = {
-                "n_estimators": 15000,
-                "learning_rate": 0.02,
+                "n_estimators": 10000,
+                "learning_rate": 0.035,
                 "max_depth": 5,
                 "subsample": 0.8,
                 "colsample_bytree": 0.3,
                 "reg_alpha": 0.071,
                 "reg_lambda": 2.0,
-                "max_bin": 1024,
+                "max_bin": 512,
                 "eval_metric": "auc",
-                "early_stopping_rounds": 500,
+                "early_stopping_rounds": 300,
                 "random_state": seed,
-                "n_jobs": -1,
+                "n_jobs": 4,
             }
             if has_gpu:
                 xgb_params["tree_method"] = "hist"
@@ -352,7 +421,10 @@ def train_single_model(
         fold_auc = roc_auc_score(y_va, val_probs)
         print(f"  [Fold {fold}/{n_splits}] ROC-AUC: {fold_auc:.6f} ({time.time() - f_start:.1f}s)")
 
-    overall_auc = roc_auc_score(y, oof_preds)
+        del clf, val_probs, test_probs_fold
+        gc.collect()
+
+    overall_auc = roc_auc_score(train_feat[TARGET].values, oof_preds)
     duration = time.time() - start_time
     print(f"=================================================================")
     print(f"[+] OVERALL 5-FOLD OOF ROC-AUC: {overall_auc:.6f}")
@@ -580,14 +652,30 @@ def main():
     seeds = args.seeds if args.seeds else [args.seed]
     models_to_run = ["lgbm", "catboost", "xgboost"] if args.model == "all" else [args.model]
 
-    models_oof: Dict[str, np.ndarray] = {}
-    models_test: Dict[str, np.ndarray] = {}
+    models_oof: Dict[str, np.ndarray] = {m: np.zeros(len(train_feat), dtype=np.float64) for m in models_to_run}
+    models_test: Dict[str, np.ndarray] = {m: np.zeros(len(test_feat), dtype=np.float64) for m in models_to_run}
 
-    for m in models_to_run:
-        seed_oofs = []
-        seed_tests = []
-        for s in seeds:
-            print(f"\n>>> Running {m.upper()} with Seed {s} ({len(seed_oofs)+1}/{len(seeds)})")
+    for s_idx, s in enumerate(seeds, 1):
+        print(f"\n=================================================================")
+        print(f"[*] SEED CYCLE {s_idx}/{len(seeds)} (Seed: {s})")
+        print(f"=================================================================")
+
+        # 1. Precompute & cache encoded folds ONCE for this seed (eliminates redundant CPU work)
+        cached_folds = prepare_seed_folds(
+            train_feat=train_feat,
+            test_feat=test_feat,
+            features=features,
+            te_cols=te_cols,
+            n_splits=args.folds,
+            seed=s,
+            pseudo_mask=pseudo_mask,
+            pseudo_targets=pseudo_targets,
+            pseudo_weight=args.pseudo_weight,
+        )
+
+        # 2. Train each requested model on cached folds at MAX throughput
+        for m in models_to_run:
+            print(f"\n>>> Running {m.upper()} on Cached Seed {s} ({s_idx}/{len(seeds)})")
             auc, oof, test_p = train_single_model(
                 model_type=m,
                 train_feat=train_feat,
@@ -602,19 +690,18 @@ def main():
                 pseudo_mask=pseudo_mask,
                 pseudo_targets=pseudo_targets,
                 pseudo_weight=args.pseudo_weight,
+                prepared_folds=cached_folds,
             )
-            seed_oofs.append(oof)
-            seed_tests.append(test_p)
+            models_oof[m] += oof / len(seeds)
+            models_test[m] += test_p / len(seeds)
 
-        avg_oof = np.mean(seed_oofs, axis=0)
-        avg_test = np.mean(seed_tests, axis=0)
-        avg_auc = roc_auc_score(train_feat[TARGET].values, avg_oof)
+        del cached_folds
+        gc.collect()
 
+    for m in models_to_run:
+        m_auc = roc_auc_score(train_feat[TARGET].values, models_oof[m])
         if len(seeds) > 1:
-            print(f"\n[+] {m.upper()} Multi-Seed Average OOF ROC-AUC ({len(seeds)} seeds): {avg_auc:.6f}")
-
-        models_oof[m] = avg_oof
-        models_test[m] = avg_test
+            print(f"\n[+] {m.upper()} Multi-Seed Average OOF ROC-AUC ({len(seeds)} seeds): {m_auc:.6f}")
 
     if len(models_to_run) > 1:
         blend_grandmaster_models(
