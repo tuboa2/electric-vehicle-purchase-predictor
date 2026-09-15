@@ -67,40 +67,60 @@ def build_grandmaster_features(
     # Dictionary to collect all generated features simultaneously (avoids DataFrame fragmentation)
     new_features: Dict[str, np.ndarray | pd.Series] = {}
 
-    # Domain Interactions
+    # Continuous Financial & Commute Dynamics
+    income_val = combined["Annual_Income_USD"].astype(float)
+    commute_val = combined["Daily_Commute_km"].astype(float)
+    age_val = combined["Age"].astype(float)
     subsidy_bin = (combined["Subsidy_Available"] == "Yes").astype(float)
-    new_features["feat_subsidy_env_gate"] = (subsidy_bin * combined["Environmental_Concern_Level"].astype(float)).values
+    env_concern = combined["Environmental_Concern_Level"].astype(float)
+
+    # 0. Chris Deotte & Fable 5.1 Generator Recipe (0.93769 baseline signal)
+    anx_med = (combined["Range_Anxiety_Level"] == "Medium").astype(float)
+    anx_high = (combined["Range_Anxiety_Level"] == "High").astype(float)
+    buy_recipe_score = (
+        1.2 * (income_val / 100000.0)
+        + 0.6 * env_concern
+        + 2.0 * subsidy_bin
+        - 1.0 * anx_med
+        - 3.0 * anx_high
+    )
+    new_features["feat_buy_recipe_score"] = buy_recipe_score.values
+    new_features["feat_recipe_dist_to_5_5"] = (buy_recipe_score - 5.5).values
+    new_features["feat_recipe_is_above_5_5"] = ((buy_recipe_score > 5.5)).astype("int8").values
+    new_features["feat_recipe_prob"] = (
+        1.0 / (1.0 + np.exp(-np.clip((buy_recipe_score - 5.5) * 2.5, -35.0, 35.0)))
+    ).values
+
+    # Domain Interactions
+    new_features["feat_subsidy_env_gate"] = (subsidy_bin * env_concern).values
     total_charging = (
         combined["Charging_Stations_Near_Home"].astype(float)
         + combined["Charging_Stations_Near_Work"].astype(float)
     )
     new_features["feat_total_charging"] = total_charging.values
     new_features["feat_commute_charging_ratio"] = (
-        combined["Daily_Commute_km"].astype(float) / (total_charging + 1.0)
+        commute_val / (total_charging + 1.0)
     ).values
+
+    # EV Charger "Staircase" Resolution (normalized by City_Type)
+    home_charging = combined["Charging_Stations_Near_Home"].astype(float)
+    work_charging = combined["Charging_Stations_Near_Work"].astype(float)
+    city_home_mean = combined.groupby("City_Type", observed=False)["Charging_Stations_Near_Home"].transform("mean")
+    city_work_mean = combined.groupby("City_Type", observed=False)["Charging_Stations_Near_Work"].transform("mean")
+    new_features["feat_charging_home_city_diff"] = (home_charging - city_home_mean).values
+    new_features["feat_charging_work_city_diff"] = (work_charging - city_work_mean).values
 
     anxiety_map = {"Low": 1.0, "Medium": 2.0, "High": 3.0}
     anx_val = combined["Range_Anxiety_Level"].map(anxiety_map).fillna(1.0).astype(float)
     new_features["feat_env_anxiety_ratio"] = (
-        combined["Environmental_Concern_Level"].astype(float) / (anx_val + 0.5)
+        env_concern / (anx_val + 0.5)
     ).values
-
-    # Continuous Financial & Commute Dynamics
-    income_val = combined["Annual_Income_USD"].astype(float)
-    commute_val = combined["Daily_Commute_km"].astype(float)
-    age_val = combined["Age"].astype(float)
 
     new_features["feat_income_per_age"] = (income_val / (age_val + 1.0)).values
     new_features["feat_income_per_commute"] = (income_val / (commute_val + 1.0)).values
     new_features["feat_commute_per_age"] = (commute_val / (age_val + 1.0)).values
-    new_features["feat_charging_density_diff"] = (
-        combined["Charging_Stations_Near_Home"].astype(float)
-        - combined["Charging_Stations_Near_Work"].astype(float)
-    ).values
-    new_features["feat_charging_home_work_ratio"] = (
-        (combined["Charging_Stations_Near_Home"].astype(float) + 1.0)
-        / (combined["Charging_Stations_Near_Work"].astype(float) + 1.0)
-    ).values
+    new_features["feat_charging_density_diff"] = (home_charging - work_charging).values
+    new_features["feat_charging_home_work_ratio"] = ((home_charging + 1.0) / (work_charging + 1.0)).values
 
     # Quantization Artifacts & Decimal Residues
     new_features["is_commute_exact_int"] = ((commute_val % 1.0 == 0.0)).astype("int8").values

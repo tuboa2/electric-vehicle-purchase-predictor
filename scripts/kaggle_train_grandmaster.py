@@ -411,112 +411,104 @@ def blend_grandmaster_models(
     oof_matrix = np.column_stack([models_oof[k] for k in model_names])
     test_matrix = np.column_stack([models_test[k] for k in model_names])
 
-    init_w = np.ones(m) / m
-    best_single_auc = max(roc_auc_score(y_true, models_oof[k]) for k in model_names)
-
-    # Method 1: Probability Space Nelder-Mead
-    def loss_prob(weights):
-        w = np.array(weights)
-        if np.sum(np.abs(w)) == 0:
-            return 0.0
-        w = w / np.sum(w)
-        blend = np.dot(oof_matrix, w)
-        return -roc_auc_score(y_true, blend)
-
-    res_prob = minimize(
-        loss_prob,
-        init_w,
-        method="Nelder-Mead",
-        bounds=[(0.0, 1.0)] * m,
-        options={"maxiter": 600, "disp": False},
-    )
-    raw_w_prob = np.clip(res_prob.x, 0.0, None)
-    best_w_prob = raw_w_prob / np.sum(raw_w_prob)
-    blend_oof_prob = np.dot(oof_matrix, best_w_prob)
-    auc_prob = roc_auc_score(y_true, blend_oof_prob)
-
-    # Method 2: Rank Space Nelder-Mead
     oof_rank_matrix = np.column_stack([rankdata(models_oof[k]) / len(y_true) for k in model_names])
     test_rank_matrix = np.column_stack([rankdata(models_test[k]) / len(test_ids) for k in model_names])
 
-    def loss_rank(weights):
-        w = np.array(weights)
-        if np.sum(np.abs(w)) == 0:
-            return 0.0
-        w = w / np.sum(w)
-        blend = np.dot(oof_rank_matrix, w)
-        return -roc_auc_score(y_true, blend)
-
-    res_rank = minimize(
-        loss_rank,
-        init_w,
-        method="Nelder-Mead",
-        bounds=[(0.0, 1.0)] * m,
-        options={"maxiter": 600, "disp": False},
-    )
-    raw_w_rank = np.clip(res_rank.x, 0.0, None)
-    best_w_rank = raw_w_rank / np.sum(raw_w_rank)
-    blend_oof_rank = np.dot(oof_rank_matrix, best_w_rank)
-    auc_rank = roc_auc_score(y_true, blend_oof_rank)
-
-    # Method 3: Logit (Log-Odds) Space Nelder-Mead
     eps = 1e-7
     clip_oof = np.clip(oof_matrix, eps, 1.0 - eps)
     oof_logit_matrix = np.log(clip_oof / (1.0 - clip_oof))
     clip_test = np.clip(test_matrix, eps, 1.0 - eps)
     test_logit_matrix = np.log(clip_test / (1.0 - clip_test))
 
-    def loss_logit(weights):
-        w = np.array(weights)
-        if np.sum(np.abs(w)) == 0:
-            return 0.0
-        w = w / np.sum(w)
-        blend_logit = np.dot(oof_logit_matrix, w)
-        blend_prob = 1.0 / (1.0 + np.exp(-np.clip(blend_logit, -35.0, 35.0)))
-        return -roc_auc_score(y_true, blend_prob)
+    best_single_auc = max(roc_auc_score(y_true, models_oof[k]) for k in model_names)
 
-    res_logit = minimize(
-        loss_logit,
-        init_w,
-        method="Nelder-Mead",
-        bounds=[(0.0, 1.0)] * m,
-        options={"maxiter": 600, "disp": False},
-    )
-    raw_w_logit = np.clip(res_logit.x, 0.0, None)
-    best_w_logit = raw_w_logit / np.sum(raw_w_logit)
-    blend_oof_logit = 1.0 / (1.0 + np.exp(-np.clip(np.dot(oof_logit_matrix, best_w_logit), -35.0, 35.0)))
-    auc_logit = roc_auc_score(y_true, blend_oof_logit)
+    import itertools
 
-    # Comparison and Tournament Selection
-    candidates = [
-        ("logit_space_nelder_mead", auc_logit, best_w_logit),
-        ("rank_space_nelder_mead", auc_rank, best_w_rank),
-        ("prob_space_nelder_mead", auc_prob, best_w_prob),
-    ]
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    chosen_method, final_auc, best_weights = candidates[0]
+    best_overall_auc = -1.0
+    best_candidate_info = None
 
-    if chosen_method == "logit_space_nelder_mead":
-        blend_test = 1.0 / (1.0 + np.exp(-np.clip(np.dot(test_logit_matrix, best_weights), -35.0, 35.0)))
-        blend_oof = blend_oof_logit
-    elif chosen_method == "rank_space_nelder_mead":
-        blend_test = np.dot(test_rank_matrix, best_weights)
-        blend_oof = blend_oof_rank
-    else:
-        blend_test = np.dot(test_matrix, best_weights)
-        blend_oof = blend_oof_prob
+    # Generate all subsets of models of size >= 2
+    subsets = []
+    for k in range(2, m + 1):
+        for comb in itertools.combinations(range(m), k):
+            subsets.append(list(comb))
 
-    weights_dict = {model_names[i]: float(best_weights[i]) for i in range(m)}
+    for subset_indices in subsets:
+        sub_names = [model_names[i] for i in subset_indices]
+        k_sub = len(subset_indices)
+        sub_oof = oof_matrix[:, subset_indices]
+        sub_test = test_matrix[:, subset_indices]
+        sub_oof_rank = oof_rank_matrix[:, subset_indices]
+        sub_test_rank = test_rank_matrix[:, subset_indices]
+        sub_oof_logit = oof_logit_matrix[:, subset_indices]
+        sub_test_logit = test_logit_matrix[:, subset_indices]
+
+        init_w_sub = np.ones(k_sub) / k_sub
+
+        # 1. Probability Space
+        def loss_p(weights):
+            w = np.array(weights)
+            if np.sum(np.abs(w)) == 0:
+                return 0.0
+            w = w / np.sum(w)
+            return -roc_auc_score(y_true, np.dot(sub_oof, w))
+
+        res_p = minimize(loss_p, init_w_sub, method="Nelder-Mead", bounds=[(0.0, 1.0)] * k_sub, options={"maxiter": 400, "disp": False})
+        w_p = np.clip(res_p.x, 0.0, None)
+        w_p = w_p / np.sum(w_p)
+        oof_p = np.dot(sub_oof, w_p)
+        p_auc = roc_auc_score(y_true, oof_p)
+        if p_auc > best_overall_auc:
+            best_overall_auc = p_auc
+            best_candidate_info = ("prob_space_nelder_mead", sub_names, w_p, oof_p, np.dot(sub_test, w_p))
+
+        # 2. Percentile Rank Space
+        def loss_r(weights):
+            w = np.array(weights)
+            if np.sum(np.abs(w)) == 0:
+                return 0.0
+            w = w / np.sum(w)
+            return -roc_auc_score(y_true, np.dot(sub_oof_rank, w))
+
+        res_r = minimize(loss_r, init_w_sub, method="Nelder-Mead", bounds=[(0.0, 1.0)] * k_sub, options={"maxiter": 400, "disp": False})
+        w_r = np.clip(res_r.x, 0.0, None)
+        w_r = w_r / np.sum(w_r)
+        oof_r = np.dot(sub_oof_rank, w_r)
+        r_auc = roc_auc_score(y_true, oof_r)
+        if r_auc > best_overall_auc:
+            best_overall_auc = r_auc
+            best_candidate_info = ("rank_space_nelder_mead", sub_names, w_r, oof_r, np.dot(sub_test_rank, w_r))
+
+        # 3. Logit Space
+        def loss_l(weights):
+            w = np.array(weights)
+            if np.sum(np.abs(w)) == 0:
+                return 0.0
+            w = w / np.sum(w)
+            b_l = np.dot(sub_oof_logit, w)
+            b_p = 1.0 / (1.0 + np.exp(-np.clip(b_l, -35.0, 35.0)))
+            return -roc_auc_score(y_true, b_p)
+
+        res_l = minimize(loss_l, init_w_sub, method="Nelder-Mead", bounds=[(0.0, 1.0)] * k_sub, options={"maxiter": 400, "disp": False})
+        w_l = np.clip(res_l.x, 0.0, None)
+        w_l = w_l / np.sum(w_l)
+        oof_l = 1.0 / (1.0 + np.exp(-np.clip(np.dot(sub_oof_logit, w_l), -35.0, 35.0)))
+        l_auc = roc_auc_score(y_true, oof_l)
+        if l_auc > best_overall_auc:
+            best_overall_auc = l_auc
+            test_l = 1.0 / (1.0 + np.exp(-np.clip(np.dot(sub_test_logit, w_l), -35.0, 35.0)))
+            best_candidate_info = ("logit_space_nelder_mead", sub_names, w_l, oof_l, test_l)
+
+    chosen_method, chosen_models, best_weights, blend_oof, blend_test = best_candidate_info
+    final_auc = best_overall_auc
+    weights_dict = {chosen_models[i]: float(best_weights[i]) for i in range(len(chosen_models))}
     delta_auc = final_auc - best_single_auc
 
-    print(f"[+] Method Comparison:")
-    print(f"    - Probability Blend AUC: {auc_prob:.6f}")
-    print(f"    - Rank-Weighted Blend AUC: {auc_rank:.6f}")
-    print(f"    - Logit-Space Blend AUC:  {auc_logit:.6f}")
-    print(f"[+] Champion Strategy:     {chosen_method.upper()}")
-    print(f"[+] Optimal Blend Weights: {weights_dict}")
-    print(f"[+] Best Single Model AUC: {best_single_auc:.6f}")
-    print(f"[+] Ensembled Grandmaster: {final_auc:.6f} (Δ: {delta_auc:+.6f})")
+    print(f"\n[+] Champion Ensemble Strategy: {chosen_method.upper()}")
+    print(f"[+] Selected Models:           {chosen_models}")
+    print(f"[+] Optimal Blend Weights:     {weights_dict}")
+    print(f"[+] Best Single Model AUC:     {best_single_auc:.6f}")
+    print(f"[+] Ensembled Grandmaster:     {final_auc:.6f} (Δ: {delta_auc:+.6f})")
 
     # Save ensemble artifacts
     ensemble_dir = output_dir.parent / "ensemble_grandmaster"
@@ -531,11 +523,8 @@ def blend_grandmaster_models(
 
     meta = {
         "ensemble_type": chosen_method,
-        "models": model_names,
+        "selected_models": chosen_models,
         "weights": weights_dict,
-        "auc_prob": float(auc_prob),
-        "auc_rank": float(auc_rank),
-        "auc_logit": float(auc_logit),
         "best_single_auc": float(best_single_auc),
         "ensemble_auc": float(final_auc),
         "delta_auc": float(delta_auc),
