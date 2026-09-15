@@ -90,6 +90,9 @@ def build_grandmaster_features(
     new_features["feat_recipe_prob"] = (
         1.0 / (1.0 + np.exp(-np.clip((buy_recipe_score - 5.5) * 2.5, -35.0, 35.0)))
     ).values
+    new_features["feat_recipe_base_margin"] = (
+        np.clip((buy_recipe_score - 5.5) * 2.2, -15.0, 15.0)
+    ).astype("float32").values
 
     # Domain Interactions
     new_features["feat_subsidy_env_gate"] = (subsidy_bin * env_concern).values

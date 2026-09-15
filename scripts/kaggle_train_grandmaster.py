@@ -256,19 +256,26 @@ def prepare_seed_folds(
             X_va[f64_tr] = X_va[f64_tr].astype("float32")
             X_te[f64_tr] = X_te[f64_tr].astype("float32")
 
+        margin_tr = X_tr["feat_recipe_base_margin"].values.astype(np.float32) if "feat_recipe_base_margin" in X_tr.columns else None
+        margin_va = X_va["feat_recipe_base_margin"].values.astype(np.float32) if "feat_recipe_base_margin" in X_va.columns else None
+        margin_te = X_te["feat_recipe_base_margin"].values.astype(np.float32) if "feat_recipe_base_margin" in X_te.columns else None
+
         folds_data.append({
             "fold": fold,
             "X_tr": X_tr,
             "y_tr": y_tr,
             "sw_tr": sw_tr,
+            "margin_tr": margin_tr,
             "X_va": X_va,
             "y_va": y_va,
+            "margin_va": margin_va,
             "X_te": X_te,
+            "margin_te": margin_te,
             "val_idx": val_idx,
         })
         print(f"  [Fold {fold}/{n_splits} Encoded] ({time.time() - f_t0:.1f}s) | Fold RAM: {X_tr.memory_usage().sum() / 1e6:.1f} MB")
 
-    print(f"[+] All {n_splits} folds pre-encoded in {time.time() - start_t:.1f}s. Models will train at MAX speed without re-encoding.")
+    print(f"[+] All {n_splits} folds pre-encoded in {time.time() - start_t:.1f}s. Models will train with native Base Margins.")
     gc.collect()
     return folds_data
 
@@ -292,7 +299,7 @@ def train_single_model(
     model_name = f"{model_type}_grandmaster"
     print(f"\n=================================================================")
     print(f"[*] TRAINING {n_splits}-FOLD GRANDMASTER: {model_name.upper()}")
-    print(f"    Accelerator: {'GPU' if has_gpu else 'CPU'}")
+    print(f"    Accelerator: {'GPU' if has_gpu else 'CPU'} | Base Margin: ACTIVE (0.93769 Utility Prior)")
     pseudo_active = pseudo_mask is not None and np.sum(pseudo_mask) > 0
     if pseudo_active:
         print(f"    Pseudo-Labeling: ACTIVE ({np.sum(pseudo_mask)} test samples added to fold train splits, weight={pseudo_weight})")
@@ -323,44 +330,59 @@ def train_single_model(
         X_tr = f_info["X_tr"]
         y_tr = f_info["y_tr"]
         sw_tr = f_info["sw_tr"]
+        margin_tr = f_info.get("margin_tr", None)
         X_va = f_info["X_va"]
         y_va = f_info["y_va"]
+        margin_va = f_info.get("margin_va", None)
         X_te = f_info["X_te"]
+        margin_te = f_info.get("margin_te", None)
         val_idx = f_info["val_idx"]
 
         if model_type == "lgbm":
             import lightgbm as lgb
-            clf = lgb.LGBMClassifier(
-                n_estimators=10000,
-                learning_rate=0.035,
-                max_depth=5,
-                num_leaves=32,
-                min_child_samples=10,
-                subsample=0.8,
-                colsample_bytree=0.3,
-                reg_alpha=0.071,
-                reg_lambda=2.0,
-                max_bin=512,
-                random_state=seed,
-                feature_pre_filter=False,
-                metric="auc",
-                n_jobs=4,
-                verbose=-1,
-            )
-            clf.fit(
-                X_tr, y_tr,
-                sample_weight=sw_tr,
-                eval_set=[(X_va, y_va)],
+            dtr = lgb.Dataset(X_tr, label=y_tr, weight=sw_tr, init_score=margin_tr, free_raw_data=False)
+            dva = lgb.Dataset(X_va, label=y_va, init_score=margin_va, reference=dtr, free_raw_data=False)
+            lgb_params = {
+                "objective": "binary",
+                "metric": "auc",
+                "learning_rate": 0.035,
+                "max_depth": 5,
+                "num_leaves": 32,
+                "min_child_samples": 10,
+                "subsample": 0.8,
+                "colsample_bytree": 0.3,
+                "reg_alpha": 0.071,
+                "reg_lambda": 2.0,
+                "max_bin": 512,
+                "random_state": seed,
+                "n_jobs": 4,
+                "verbose": -1,
+            }
+            bst = lgb.train(
+                lgb_params,
+                dtr,
+                valid_sets=[dva],
+                num_boost_round=10000,
                 callbacks=[
                     lgb.early_stopping(stopping_rounds=300, verbose=False),
                     lgb.log_evaluation(period=1000),
                 ],
             )
-            val_probs = clf.predict_proba(X_va)[:, 1]
-            test_probs_fold = clf.predict_proba(X_te)[:, 1]
+            if margin_va is not None:
+                val_raw = bst.predict(X_va, raw_score=True) + margin_va
+                val_probs = 1.0 / (1.0 + np.exp(-np.clip(val_raw, -35.0, 35.0)))
+                test_raw = bst.predict(X_te, raw_score=True) + margin_te
+                test_probs_fold = 1.0 / (1.0 + np.exp(-np.clip(test_raw, -35.0, 35.0)))
+            else:
+                val_probs = bst.predict(X_va)
+                test_probs_fold = bst.predict(X_te)
+            del bst, dtr, dva
 
         elif model_type == "catboost":
             import catboost as cb
+            tr_pool = cb.Pool(X_tr, y_tr, weight=sw_tr, baseline=margin_tr)
+            va_pool = cb.Pool(X_va, y_va, baseline=margin_va)
+            te_pool = cb.Pool(X_te, baseline=margin_te)
             cb_params = {
                 "iterations": 8000,
                 "learning_rate": 0.04,
@@ -374,19 +396,22 @@ def train_single_model(
             if has_gpu:
                 cb_params["task_type"] = "GPU"
             clf = cb.CatBoostClassifier(**cb_params)
-            clf.fit(
-                X_tr, y_tr,
-                sample_weight=sw_tr,
-                eval_set=(X_va, y_va),
-                verbose=1000,
-            )
-            val_probs = clf.predict_proba(X_va)[:, 1]
-            test_probs_fold = clf.predict_proba(X_te)[:, 1]
+            clf.fit(tr_pool, eval_set=va_pool, verbose=1000)
+            val_probs = clf.predict_proba(va_pool)[:, 1]
+            test_probs_fold = clf.predict_proba(te_pool)[:, 1]
+            del clf, tr_pool, va_pool, te_pool
 
         elif model_type == "xgboost":
             import xgboost as xgb
+            dtr = xgb.DMatrix(X_tr, label=y_tr, weight=sw_tr, base_margin=margin_tr)
+            dva = xgb.DMatrix(X_va, label=y_va, base_margin=margin_va)
+            dte = xgb.DMatrix(X_te, base_margin=margin_te)
+
             xgb_params = {
-                "n_estimators": 10000,
+                "objective": "binary:logistic",
+                "eval_metric": "auc",
+                "tree_method": "hist",
+                "device": "cuda" if has_gpu else "cpu",
                 "learning_rate": 0.035,
                 "max_depth": 5,
                 "subsample": 0.8,
@@ -394,27 +419,20 @@ def train_single_model(
                 "reg_alpha": 0.071,
                 "reg_lambda": 2.0,
                 "max_bin": 512,
-                "eval_metric": "auc",
-                "early_stopping_rounds": 300,
-                "random_state": seed,
-                "n_jobs": 4,
+                "seed": seed,
+                "nthread": 4,
             }
-            if has_gpu:
-                xgb_params["tree_method"] = "hist"
-                xgb_params["device"] = "cuda"
-            else:
-                xgb_params["tree_method"] = "hist"
-                xgb_params["device"] = "cpu"
-
-            clf = xgb.XGBClassifier(**xgb_params)
-            clf.fit(
-                X_tr, y_tr,
-                sample_weight=sw_tr,
-                eval_set=[(X_va, y_va)],
-                verbose=1000,
+            bst = xgb.train(
+                xgb_params,
+                dtr,
+                evals=[(dva, "val")],
+                num_boost_round=10000,
+                callbacks=[xgb.callback.EarlyStopping(rounds=300, save_best=True)],
+                verbose_eval=1000,
             )
-            val_probs = clf.predict_proba(X_va)[:, 1]
-            test_probs_fold = clf.predict_proba(X_te)[:, 1]
+            val_probs = bst.predict(dva)
+            test_probs_fold = bst.predict(dte)
+            del bst, dtr, dva, dte
         else:
             raise ValueError(f"Unknown model_type: {model_type}")
 
@@ -423,7 +441,7 @@ def train_single_model(
         fold_auc = roc_auc_score(y_va, val_probs)
         print(f"  [Fold {fold}/{n_splits}] ROC-AUC: {fold_auc:.6f} ({time.time() - f_start:.1f}s)")
 
-        del clf, val_probs, test_probs_fold
+        del val_probs, test_probs_fold
         gc.collect()
 
     overall_auc = roc_auc_score(train_feat[TARGET].values, oof_preds)
@@ -592,6 +610,23 @@ def blend_grandmaster_models(
     blend_sub.to_csv(ensemble_dir / "submission.csv", index=False)
     blend_sub.to_csv(primary_sub_path, index=False)
 
+    # Save standalone pure rank and single-model root submissions for direct testing
+    work_dir = primary_sub_path.parent
+    if "lgbm" in models_test and "xgboost" in models_test:
+        r_lgb = rankdata(models_test["lgbm"]) / len(test_ids)
+        r_xgb = rankdata(models_test["xgboost"]) / len(test_ids)
+        rank_dual = pd.DataFrame({"id": test_ids, TARGET: 0.5 * r_lgb + 0.5 * r_xgb})
+        rank_dual.to_csv(work_dir / "submission_dual_rank.csv", index=False)
+        print(f"[+] Pure LGBM+XGBoost 50/50 Rank Average written to: {work_dir / 'submission_dual_rank.csv'}")
+
+    if "xgboost" in models_test:
+        pd.DataFrame({"id": test_ids, TARGET: models_test["xgboost"]}).to_csv(work_dir / "submission_xgb_pure.csv", index=False)
+        print(f"[+] Pure Multi-Seed XGBoost submission written to:       {work_dir / 'submission_xgb_pure.csv'}")
+
+    if "lgbm" in models_test:
+        pd.DataFrame({"id": test_ids, TARGET: models_test["lgbm"]}).to_csv(work_dir / "submission_lgb_pure.csv", index=False)
+        print(f"[+] Pure Multi-Seed LightGBM submission written to:      {work_dir / 'submission_lgb_pure.csv'}")
+
     blend_oof_df = pd.DataFrame({"id": range(len(blend_oof)), "oof_pred": blend_oof, "target": y_true})
     blend_oof_df.to_parquet(ensemble_dir / "oof_preds.parquet", index=False)
 
@@ -606,12 +641,12 @@ def blend_grandmaster_models(
     with open(ensemble_dir / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"[+] Grandmaster blend submission written to: {primary_sub_path}")
+    print(f"[+] Grandmaster champion blend written to:                 {primary_sub_path}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Grandmaster EV Purchase Training")
-    parser.add_argument("--model", type=str, choices=["lgbm", "catboost", "xgboost", "all"], default="lgbm")
+    parser.add_argument("--model", type=str, choices=["lgbm", "catboost", "xgboost", "dual", "all"], default="dual")
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42, help="Primary random seed")
     parser.add_argument("--seeds", nargs="+", type=int, default=None, help="List of seeds for multi-seed averaging (e.g. --seeds 42 2024 777)")
@@ -652,7 +687,12 @@ def main():
         )
 
     seeds = args.seeds if args.seeds else [args.seed]
-    models_to_run = ["lgbm", "catboost", "xgboost"] if args.model == "all" else [args.model]
+    if args.model == "all":
+        models_to_run = ["lgbm", "catboost", "xgboost"]
+    elif args.model == "dual":
+        models_to_run = ["lgbm", "xgboost"]
+    else:
+        models_to_run = [args.model]
 
     models_oof: Dict[str, np.ndarray] = {m: np.zeros(len(train_feat), dtype=np.float64) for m in models_to_run}
     models_test: Dict[str, np.ndarray] = {m: np.zeros(len(test_feat), dtype=np.float64) for m in models_to_run}

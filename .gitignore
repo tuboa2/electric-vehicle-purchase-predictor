@@ -65,3 +65,4 @@ Thumbs.db
 *.csv
 !data/original/**
 uv.lock
+catboost_info/
