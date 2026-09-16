@@ -50,6 +50,54 @@ def detect_gpu() -> bool:
     return False
 
 
+_LGBM_DEVICE_CACHE = None
+
+
+def probe_lgbm_device(has_gpu: bool) -> str:
+    """
+    Safely probes whether LightGBM has GPU acceleration available (CUDA or OpenCL).
+    Gracefully falls back to CPU if GPU tree learner is not compiled in the binary.
+    """
+    if not has_gpu:
+        return "cpu"
+    try:
+        import lightgbm as lgb
+        X_micro = np.random.randn(50, 4).astype(np.float32)
+        y_micro = np.random.randint(0, 2, 50).astype(np.float32)
+        ds_micro = lgb.Dataset(X_micro, label=y_micro, free_raw_data=False)
+
+        # 1. Test native CUDA
+        try:
+            bst = lgb.train({"device": "cuda", "verbose": -1}, ds_micro, num_boost_round=1)
+            del bst, ds_micro
+            print("[+] LightGBM native CUDA acceleration ENABLED (device='cuda')")
+            return "cuda"
+        except Exception:
+            pass
+
+        # 2. Test OpenCL GPU
+        try:
+            ds_micro = lgb.Dataset(X_micro, label=y_micro, free_raw_data=False)
+            bst = lgb.train({"device": "gpu", "verbose": -1}, ds_micro, num_boost_round=1)
+            del bst, ds_micro
+            print("[+] LightGBM OpenCL GPU acceleration ENABLED (device='gpu')")
+            return "gpu"
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    print("[*] LightGBM running on CPU with maximum thread parallelism (n_jobs=-1)")
+    return "cpu"
+
+
+def get_lgbm_device(has_gpu: bool) -> str:
+    global _LGBM_DEVICE_CACHE
+    if _LGBM_DEVICE_CACHE is None:
+        _LGBM_DEVICE_CACHE = probe_lgbm_device(has_gpu)
+    return _LGBM_DEVICE_CACHE
+
+
 def locate_data_dir() -> Path:
     kaggle_input = Path("/kaggle/input")
     if kaggle_input.exists():
@@ -342,10 +390,12 @@ def train_single_model(
             import lightgbm as lgb
             dtr = lgb.Dataset(X_tr, label=y_tr, weight=sw_tr, init_score=margin_tr, free_raw_data=False)
             dva = lgb.Dataset(X_va, label=y_va, init_score=margin_va, reference=dtr, free_raw_data=False)
+            lgb_dev = get_lgbm_device(has_gpu)
             lgb_params = {
                 "objective": "binary",
                 "metric": "auc",
-                "learning_rate": 0.025,
+                "device": lgb_dev,
+                "learning_rate": 0.035,
                 "max_depth": 6,
                 "num_leaves": 63,
                 "min_child_samples": 20,
@@ -354,9 +404,9 @@ def train_single_model(
                 "colsample_bytree": 0.4,
                 "reg_alpha": 0.05,
                 "reg_lambda": 2.5,
-                "max_bin": 512,
+                "max_bin": 255 if lgb_dev != "cpu" else 512,
                 "random_state": seed,
-                "n_jobs": 4,
+                "n_jobs": -1 if lgb_dev == "cpu" else 4,
                 "verbose": -1,
             }
             bst = lgb.train(
@@ -396,6 +446,9 @@ def train_single_model(
             }
             if has_gpu:
                 cb_params["task_type"] = "GPU"
+                cb_params["devices"] = "0"
+            else:
+                cb_params["thread_count"] = -1
             clf = cb.CatBoostClassifier(**cb_params)
             clf.fit(tr_pool, eval_set=va_pool, verbose=1000)
             val_probs = clf.predict_proba(va_pool)[:, 1]
@@ -413,7 +466,7 @@ def train_single_model(
                 "eval_metric": "auc",
                 "tree_method": "hist",
                 "device": "cuda" if has_gpu else "cpu",
-                "learning_rate": 0.025,
+                "learning_rate": 0.03,
                 "max_depth": 6,
                 "subsample": 0.8,
                 "colsample_bytree": 0.4,
@@ -421,7 +474,7 @@ def train_single_model(
                 "reg_lambda": 2.5,
                 "max_bin": 512,
                 "seed": seed,
-                "nthread": 4,
+                "nthread": 4 if has_gpu else -1,
             }
             bst = xgb.train(
                 xgb_params,
@@ -666,17 +719,34 @@ def blend_grandmaster_models(
         rank_dual.to_csv(work_dir / "submission_dual_rank.csv", index=False)
         print(f"[+] Zero-Tie LGBM+XGBoost 50/50 Rank Average written to:     {work_dir / 'submission_dual_rank.csv'}")
 
-    # 3. Pure XGBoost with Zero-Tie Lexsort
+    # 4. Tri-Rank with Zero-Tie Lexsort (LGBM + XGBoost + CatBoost)
+    if "lgbm" in models_test and "xgboost" in models_test and "catboost" in models_test:
+        r_lgb = rankdata(models_test["lgbm"]) / len(test_ids)
+        r_xgb = rankdata(models_test["xgboost"]) / len(test_ids)
+        r_cat = rankdata(models_test["catboost"]) / len(test_ids)
+        tri_mean = (r_lgb + r_xgb + r_cat) / 3.0
+        tri_zero_tie = make_zero_tie_ranks(tri_mean, secondary_score)
+        rank_tri = pd.DataFrame({"id": test_ids, TARGET: tri_zero_tie})
+        rank_tri.to_csv(work_dir / "submission_tri_rank.csv", index=False)
+        print(f"[+] Zero-Tie LGBM+XGB+CatBoost Tri-Rank Average written to: {work_dir / 'submission_tri_rank.csv'}")
+
+    # 5. Pure XGBoost with Zero-Tie Lexsort
     if "xgboost" in models_test:
         xgb_zt = make_zero_tie_ranks(models_test["xgboost"], secondary_score)
         pd.DataFrame({"id": test_ids, TARGET: xgb_zt}).to_csv(work_dir / "submission_xgb_pure.csv", index=False)
         print(f"[+] Zero-Tie Multi-Seed XGBoost submission written to:       {work_dir / 'submission_xgb_pure.csv'}")
 
-    # 4. Pure LightGBM with Zero-Tie Lexsort
+    # 6. Pure LightGBM with Zero-Tie Lexsort
     if "lgbm" in models_test:
         lgb_zt = make_zero_tie_ranks(models_test["lgbm"], secondary_score)
         pd.DataFrame({"id": test_ids, TARGET: lgb_zt}).to_csv(work_dir / "submission_lgb_pure.csv", index=False)
         print(f"[+] Zero-Tie Multi-Seed LightGBM submission written to:      {work_dir / 'submission_lgb_pure.csv'}")
+
+    # 7. Pure CatBoost with Zero-Tie Lexsort
+    if "catboost" in models_test:
+        cat_zt = make_zero_tie_ranks(models_test["catboost"], secondary_score)
+        pd.DataFrame({"id": test_ids, TARGET: cat_zt}).to_csv(work_dir / "submission_cat_pure.csv", index=False)
+        print(f"[+] Zero-Tie Multi-Seed CatBoost submission written to:      {work_dir / 'submission_cat_pure.csv'}")
 
     blend_oof_df = pd.DataFrame({"id": range(len(blend_oof)), "oof_pred": blend_oof, "target": y_true})
     blend_oof_df.to_parquet(ensemble_dir / "oof_preds.parquet", index=False)

@@ -21,37 +21,45 @@
 
 ## Kaggle Notebook Execution (Dual T4 GPU Recommended)
 
-### Step 1: Pull the Latest Repository
+### Step 1: Pull Latest Repository & Enable GPU Acceleration
+In your Kaggle notebook, run:
 ```python
 %cd /kaggle/working/electric-vehicle
 !git pull origin main
+
+# Optional: Upgrade LightGBM for native CUDA GPU acceleration
+!pip install -q lightgbm --upgrade
 ```
 
-### Step 2: Train Model 1 (LightGBM + Original Dataset + Target Encoding)
+### Step 2: Immediate Recovery Submission (Zero-Wait)
+If you want to submit right away, you have `submission_grandmaster_meta_blend.csv` and `submission_dual_rank.csv` already generated with zero ties and uncorrupted ranks:
+```python
+import pandas as pd
+# Verify clean 0-tie format
+df = pd.read_csv("/kaggle/working/electric-vehicle/submission_grandmaster_meta_blend.csv")
+print(f"Shape: {df.shape} | Unique ranks: {df['Will_Buy_EV'].nunique()}")
+df.to_csv("/kaggle/working/submission.csv", index=False)
+```
+
+### Step 3: Launch Grandmaster Top-1 Pipeline (LGBM GPU + CatBoost GPU + XGBoost GPU)
+To train the full multi-view orthogonal ensemble with 10 folds and 3 seeds across all three GPU architectures:
 ```bash
-!python scripts/kaggle_train.py --model lgbm --features domain --use-original
+!python scripts/kaggle_train_grandmaster.py --model all --folds 10 --seeds 42 2024 777
 ```
+*Key features:*
+- **LightGBM:** Auto-probes `device='cuda'` -> `device='gpu'` -> multi-threaded CPU.
+- **CatBoost:** Native GPU acceleration (`task_type="GPU"`).
+- **XGBoost:** Native CUDA acceleration (`tree_method="hist"`, `device="cuda"`).
+- **Blending:** Automatically runs Nelder-Mead on Probability, Rank, and Logit spaces across all single, dual, and tri-model combinations.
+- **Submissions emitted:**
+  1. `submission.csv` / `submission_zero_tie_champion.csv`: Best OOF Nelder-Mead blend with continuous zero-tie ranking.
+  2. `submission_tri_rank.csv`: 33% LGBM + 33% XGB + 33% CatBoost zero-tie rank average.
+  3. `submission_dual_rank.csv`: 50% LGBM + 50% XGBoost zero-tie rank average.
+  4. `submission_pure_prob.csv`: Unperturbed Nelder-Mead probability blend.
+  5. `submission_cat_pure.csv`, `submission_xgb_pure.csv`, `submission_lgb_pure.csv`: Single-model multi-seed baselines.
 
-### Step 3: Train Model 2 (CatBoost GPU + Original Dataset)
+### Step 4: Package Artifacts (Optional)
+To download all new models, OOFs, and test predictions:
 ```bash
-!python scripts/kaggle_train.py --model catboost --features domain --use-original
+!python scripts/package_kaggle_artifacts.py
 ```
-
-### Step 4: Train Model 3 (XGBoost CUDA + Original Dataset)
-```bash
-!python scripts/kaggle_train.py --model xgboost --features domain --use-original
-```
-
-### Step 5: Train Model 4 (PyTorch Tabular Neural Network on GPU)
-```bash
-!python scripts/kaggle_train_nn.py --epochs 12 --batch-size 2048
-```
-
-### Step 6: Execute the Multi-Model Blender
-```bash
-!python scripts/kaggle_blend.py
-```
-
-### Step 7: Submit to Kaggle
-- The ensemble blender automatically writes the verified final predictions to `/kaggle/working/submission.csv`.
-- On the right panel under **Data $\to$ Output**, click **Submit** next to `submission.csv`.

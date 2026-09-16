@@ -28,6 +28,7 @@ Implements the synthetic artifact exploits discovered in top-tier competition so
 from typing import Dict, List, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
+from scipy.special import ndtr
 
 
 TARGET = "Will_Buy_EV"
@@ -84,15 +85,19 @@ def build_grandmaster_features(
         - 1.0 * anx_med
         - 3.0 * anx_high
     )
+    recipe_diff = (buy_recipe_score - 5.61235).values
     new_features["feat_buy_recipe_score"] = buy_recipe_score.values
-    new_features["feat_recipe_dist_to_5_5"] = (buy_recipe_score - 5.5).values
-    new_features["feat_recipe_is_above_5_5"] = ((buy_recipe_score > 5.5)).astype("int8").values
-    new_features["feat_recipe_prob"] = (
-        1.0 / (1.0 + np.exp(-np.clip((buy_recipe_score - 5.5) * 2.5, -35.0, 35.0)))
-    ).values
+    new_features["feat_recipe_dist_to_boundary"] = recipe_diff
+    new_features["feat_recipe_is_above_boundary"] = (recipe_diff > 0.0).astype("int8")
+    new_features["feat_recipe_prob_logit"] = (
+        1.0 / (1.0 + np.exp(-np.clip(recipe_diff * 2.17464, -35.0, 35.0)))
+    ).astype("float32")
+    new_features["feat_recipe_prob_probit"] = (
+        ndtr(np.clip(recipe_diff / 0.834476, -8.0, 8.0))
+    ).astype("float32")
     new_features["feat_recipe_base_margin"] = (
-        np.clip((buy_recipe_score - 5.5) * 2.2, -15.0, 15.0)
-    ).astype("float32").values
+        np.clip(recipe_diff * 2.17464, -15.0, 15.0)
+    ).astype("float32")
 
     # Domain Interactions
     new_features["feat_subsidy_env_gate"] = (subsidy_bin * env_concern).values
@@ -131,6 +136,10 @@ def build_grandmaster_features(
     new_features["feat_commute_per_age"] = (commute_val / (age_val + 1.0)).values
     new_features["feat_charging_density_diff"] = (home_charging - work_charging).values
     new_features["feat_charging_home_work_ratio"] = ((home_charging + 1.0) / (work_charging + 1.0)).values
+    new_features["feat_commute_x_anxiety"] = (commute_val * anx_val).astype("float32").values
+    if "Number_of_Cars_Owned" in combined.columns:
+        cars_owned = combined["Number_of_Cars_Owned"].astype(float)
+        new_features["feat_income_per_car"] = (income_val / (cars_owned + 1.0)).astype("float32").values
 
     # Quantization Artifacts & Decimal Residues
     new_features["is_commute_exact_int"] = ((commute_val % 1.0 == 0.0)).astype("int8").values
