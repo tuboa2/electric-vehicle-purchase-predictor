@@ -224,6 +224,7 @@ def prepare_seed_folds(
     pseudo_mask: Optional[np.ndarray] = None,
     pseudo_targets: Optional[np.ndarray] = None,
     pseudo_weight: float = 0.8,
+    use_base_margin: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Precomputes & caches Target-Encoded fold matrices once per random seed.
@@ -281,17 +282,17 @@ def prepare_seed_folds(
             te_data_va = {}
             te_data_te = {}
             for idx, col in enumerate(te_cols):
-                te_data_tr[f"{col}_TE_auto"] = tr_auto[:, idx].astype("float32")
-                te_data_va[f"{col}_TE_auto"] = va_auto[:, idx].astype("float32")
-                te_data_te[f"{col}_TE_auto"] = te_auto_arr[:, idx].astype("float32")
+                te_data_tr[f"{col}_te_auto"] = tr_auto[:, idx].astype("float32")
+                te_data_va[f"{col}_te_auto"] = va_auto[:, idx].astype("float32")
+                te_data_te[f"{col}_te_auto"] = te_auto_arr[:, idx].astype("float32")
 
-                te_data_tr[f"{col}_TE_10"] = tr_10[:, idx].astype("float32")
-                te_data_va[f"{col}_TE_10"] = va_10[:, idx].astype("float32")
-                te_data_te[f"{col}_TE_10"] = te_10_arr[:, idx].astype("float32")
+                te_data_tr[f"{col}_te_10"] = tr_10[:, idx].astype("float32")
+                te_data_va[f"{col}_te_10"] = va_10[:, idx].astype("float32")
+                te_data_te[f"{col}_te_10"] = te_10_arr[:, idx].astype("float32")
 
-                te_data_tr[f"{col}_TE_100"] = tr_100[:, idx].astype("float32")
-                te_data_va[f"{col}_TE_100"] = va_100[:, idx].astype("float32")
-                te_data_te[f"{col}_TE_100"] = te_100_arr[:, idx].astype("float32")
+                te_data_tr[f"{col}_te_100"] = tr_100[:, idx].astype("float32")
+                te_data_va[f"{col}_te_100"] = va_100[:, idx].astype("float32")
+                te_data_te[f"{col}_te_100"] = te_100_arr[:, idx].astype("float32")
 
             X_tr = pd.concat([X_tr.drop(columns=te_cols), pd.DataFrame(te_data_tr, index=X_tr.index)], axis=1)
             X_va = pd.concat([X_va.drop(columns=te_cols), pd.DataFrame(te_data_va, index=X_va.index)], axis=1)
@@ -304,9 +305,9 @@ def prepare_seed_folds(
             X_va[f64_tr] = X_va[f64_tr].astype("float32")
             X_te[f64_tr] = X_te[f64_tr].astype("float32")
 
-        margin_tr = X_tr["feat_recipe_base_margin"].values.astype(np.float32) if "feat_recipe_base_margin" in X_tr.columns else None
-        margin_va = X_va["feat_recipe_base_margin"].values.astype(np.float32) if "feat_recipe_base_margin" in X_va.columns else None
-        margin_te = X_te["feat_recipe_base_margin"].values.astype(np.float32) if "feat_recipe_base_margin" in X_te.columns else None
+        margin_tr = X_tr["feat_recipe_base_margin"].values.astype(np.float32) if ("feat_recipe_base_margin" in X_tr.columns and use_base_margin) else None
+        margin_va = X_va["feat_recipe_base_margin"].values.astype(np.float32) if ("feat_recipe_base_margin" in X_va.columns and use_base_margin) else None
+        margin_te = X_te["feat_recipe_base_margin"].values.astype(np.float32) if ("feat_recipe_base_margin" in X_te.columns and use_base_margin) else None
 
         folds_data.append({
             "fold": fold,
@@ -699,15 +700,25 @@ def blend_grandmaster_models(
     pure_prob_sub = pd.DataFrame({"id": test_ids, TARGET: blend_test})
     pure_prob_sub.to_csv(ensemble_dir / "submission_pure_prob.csv", index=False)
     pure_prob_sub.to_csv(work_dir / "submission_pure_prob.csv", index=False)
-    print(f"[+] Pure Calibrated Probability Blend written to:       {work_dir / 'submission_pure_prob.csv'}")
+    pure_prob_sub.to_csv(ensemble_dir / "submission.csv", index=False)
+    pure_prob_sub.to_csv(primary_sub_path, index=False)
+    print(f"[+] Champion Calibrated Probability Blend written to:       {primary_sub_path}")
 
-    # 2. Champion Zero-Tie Lexsort Submission (NO noisy perturbations)
+    # 2. Champion Micro-Jitter Zero-Tie Submission (Preserves 100% Probability Distribution, 0 ties)
+    if secondary_score is not None:
+        sec_norm = (secondary_score - np.nanmean(secondary_score)) / (np.nanstd(secondary_score) + 1e-7)
+        micro_zero_tie = blend_test + 1e-9 * sec_norm
+    else:
+        micro_zero_tie = blend_test
+    micro_sub = pd.DataFrame({"id": test_ids, TARGET: micro_zero_tie})
+    micro_sub.to_csv(ensemble_dir / "submission_micro_zero_tie.csv", index=False)
+    micro_sub.to_csv(work_dir / "submission_micro_zero_tie.csv", index=False)
+    print(f"[+] Micro-Jitter Zero-Tie Probability Blend written to:   {work_dir / 'submission_micro_zero_tie.csv'}")
+
+    # 3. Optional Uniform Rank Lexsort Submission
     zero_tie_champion = make_zero_tie_ranks(blend_test, secondary_score)
-    blend_sub = pd.DataFrame({"id": test_ids, TARGET: zero_tie_champion})
-    blend_sub.to_csv(ensemble_dir / "submission.csv", index=False)
-    blend_sub.to_csv(primary_sub_path, index=False)
-    blend_sub.to_csv(work_dir / "submission_zero_tie_champion.csv", index=False)
-    print(f"[+] Clean Zero-Tie Champion Blend (0 ties) written to:   {primary_sub_path}")
+    pd.DataFrame({"id": test_ids, TARGET: zero_tie_champion}).to_csv(work_dir / "submission_zero_tie_champion.csv", index=False)
+    pd.DataFrame({"id": test_ids, TARGET: zero_tie_champion}).to_csv(work_dir / "submission_uniform_rank.csv", index=False)
 
     # 3. Dual Rank with Zero-Tie Lexsort (No ties!)
     if "lgbm" in models_test and "xgboost" in models_test:
@@ -776,6 +787,7 @@ def main():
     parser.add_argument("--pseudo-conf-high", type=float, default=0.995, help="High confidence threshold (positive)")
     parser.add_argument("--pseudo-conf-low", type=float, default=0.005, help="Low confidence threshold (negative)")
     parser.add_argument("--pseudo-weight", type=float, default=0.8, help="Sample weight for pseudo-labeled points")
+    parser.add_argument("--use-base-margin", action="store_true", default=False, help="Enable recipe base margin for XGBoost")
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--sub-path", type=str, default=None)
     args = parser.parse_args()
@@ -834,6 +846,7 @@ def main():
             pseudo_mask=pseudo_mask,
             pseudo_targets=pseudo_targets,
             pseudo_weight=args.pseudo_weight,
+            use_base_margin=args.use_base_margin,
         )
 
         # 2. Train each requested model on cached folds at MAX throughput
