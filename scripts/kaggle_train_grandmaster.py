@@ -496,16 +496,6 @@ def make_zero_tie_ranks(primary_scores: np.ndarray, secondary_scores: Optional[n
     return ranks
 
 
-def apply_power_residual(scores: np.ndarray, power: float = 0.74) -> np.ndarray:
-    """
-    Grandmaster 'Honest Round' power-residual post-processing.
-    Adjusts discrete boundary residuals using sign-preserving power transformation.
-    """
-    base = np.round(scores, 7)
-    ref = np.round(scores, 6)
-    res = base - ref
-    return base + np.sign(res) * (np.abs(res) ** power)
-
 
 def blend_grandmaster_models(
     models_oof: Dict[str, np.ndarray],
@@ -651,18 +641,22 @@ def blend_grandmaster_models(
                 - 3.0 * (anx == "High").astype(float)
             )
 
-    # 1. Champion Submission with Power Residual + Zero-Tie Lexsort
-    adj_blend = apply_power_residual(blend_test, power=0.74)
-    zero_tie_champion = make_zero_tie_ranks(adj_blend, secondary_score)
+    # 1. Champion Submission: Pure Probability Nelder-Mead Blend
+    work_dir = primary_sub_path.parent
+    pure_prob_sub = pd.DataFrame({"id": test_ids, TARGET: blend_test})
+    pure_prob_sub.to_csv(ensemble_dir / "submission_pure_prob.csv", index=False)
+    pure_prob_sub.to_csv(work_dir / "submission_pure_prob.csv", index=False)
+    print(f"[+] Pure Calibrated Probability Blend written to:       {work_dir / 'submission_pure_prob.csv'}")
+
+    # 2. Champion Zero-Tie Lexsort Submission (NO noisy perturbations)
+    zero_tie_champion = make_zero_tie_ranks(blend_test, secondary_score)
     blend_sub = pd.DataFrame({"id": test_ids, TARGET: zero_tie_champion})
     blend_sub.to_csv(ensemble_dir / "submission.csv", index=False)
     blend_sub.to_csv(primary_sub_path, index=False)
-
-    work_dir = primary_sub_path.parent
     blend_sub.to_csv(work_dir / "submission_zero_tie_champion.csv", index=False)
-    print(f"[+] Zero-Tie Champion Ensemble (0 ties guaranteed) written to: {work_dir / 'submission_zero_tie_champion.csv'}")
+    print(f"[+] Clean Zero-Tie Champion Blend (0 ties) written to:   {primary_sub_path}")
 
-    # 2. Dual Rank with Zero-Tie Lexsort (No ties!)
+    # 3. Dual Rank with Zero-Tie Lexsort (No ties!)
     if "lgbm" in models_test and "xgboost" in models_test:
         r_lgb = rankdata(models_test["lgbm"]) / len(test_ids)
         r_xgb = rankdata(models_test["xgboost"]) / len(test_ids)
