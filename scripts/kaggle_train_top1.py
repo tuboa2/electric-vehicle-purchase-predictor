@@ -240,19 +240,28 @@ def train_lgbm(
     tag = "BOUNDARY_SPECIALIST" if is_boundary_specialist else ("BASE_MARGIN" if use_base_margin else "FREE_TREE")
     print(f"\n--- Training LightGBM [{tag}] (Seed: {seed}) ---")
 
+    if is_boundary_specialist:
+        lr, leaves, depth, alpha, reg_l, min_child = 0.020, 63, 5, 0.30, 8.0, 50
+    elif use_base_margin:
+        # Constrained shallow trees force fitting strictly the residual error without re-learning the recipe
+        lr, leaves, depth, alpha, reg_l, min_child = 0.020, 31, 5, 0.20, 6.0, 100
+    else:
+        # Free-Tree high capacity exploratory splits
+        lr, leaves, depth, alpha, reg_l, min_child = 0.030, 127, 8, 0.10, 0.5, 40
+
     params = {
         "objective": "binary",
         "metric": "auc",
         "boosting_type": "gbdt",
-        "learning_rate": 0.025 if is_boundary_specialist else 0.03,
-        "num_leaves": 63 if is_boundary_specialist else 127,
-        "max_depth": 6 if is_boundary_specialist else 8,
+        "learning_rate": lr,
+        "num_leaves": leaves,
+        "max_depth": depth,
         "feature_fraction": 0.75,
         "bagging_fraction": 0.85,
         "bagging_freq": 1,
-        "min_child_samples": 50,
-        "reg_alpha": 0.2,
-        "reg_lambda": 0.5,
+        "min_child_samples": min_child,
+        "reg_alpha": alpha,
+        "reg_lambda": reg_l,
         "random_state": seed,
         "verbose": -1,
         "n_jobs": -1,
@@ -331,18 +340,27 @@ def train_xgboost(
     tag = "BOUNDARY_SPECIALIST" if is_boundary_specialist else ("BASE_MARGIN" if use_base_margin else "FREE_TREE")
     print(f"\n--- Training XGBoost [{tag}] (Seed: {seed}) ---")
 
+    if is_boundary_specialist:
+        lr, depth, min_child, alpha, reg_l, sub, col = 0.015, 4, 20, 0.30, 15.0, 0.90, 0.65
+    elif use_base_margin:
+        # Constrained shallow trees force residual learning
+        lr, depth, min_child, alpha, reg_l, sub, col = 0.020, 5, 20, 0.20, 8.0, 0.85, 0.75
+    else:
+        # Free-Tree high capacity
+        lr, depth, min_child, alpha, reg_l, sub, col = 0.030, 7, 6, 0.10, 3.0, 0.85, 0.75
+
     params = {
         "objective": "binary:logistic",
         "eval_metric": "auc",
         "tree_method": "hist",
         "device": "cuda" if has_gpu else "cpu",
-        "learning_rate": 0.025 if is_boundary_specialist else 0.03,
-        "max_depth": 6 if is_boundary_specialist else 7,
-        "min_child_weight": 10 if is_boundary_specialist else 6,
-        "subsample": 0.85,
-        "colsample_bytree": 0.75,
-        "reg_alpha": 0.15,
-        "reg_lambda": 4.0,
+        "learning_rate": lr,
+        "max_depth": depth,
+        "min_child_weight": min_child,
+        "subsample": sub,
+        "colsample_bytree": col,
+        "reg_alpha": alpha,
+        "reg_lambda": reg_l,
         "random_state": seed,
         "n_jobs": -1,
     }
@@ -415,11 +433,18 @@ def train_catboost(
     tag = "BOUNDARY_SPECIALIST" if is_boundary_specialist else ("BASE_MARGIN" if use_base_margin else "FREE_TREE")
     print(f"\n--- Training CatBoost [{tag}] (Seed: {seed}) ---")
 
+    if is_boundary_specialist:
+        lr, depth, l2_reg = 0.020, 5, 10.0
+    elif use_base_margin:
+        lr, depth, l2_reg = 0.020, 5, 8.0
+    else:
+        lr, depth, l2_reg = 0.030, 7, 3.0
+
     params = {
         "iterations": 2500 if is_boundary_specialist else 3500,
-        "learning_rate": 0.03,
-        "depth": 6,
-        "l2_leaf_reg": 5.0,
+        "learning_rate": lr,
+        "depth": depth,
+        "l2_leaf_reg": l2_reg,
         "eval_metric": "AUC",
         "random_seed": seed,
         "verbose": False,
@@ -477,10 +502,12 @@ def hierarchical_gated_blend(
     y_true: np.ndarray,
     recipe_diff_tr: np.ndarray,
     recipe_diff_te: np.ndarray,
+    stream_nn_oof: Optional[np.ndarray] = None,
+    stream_nn_test: Optional[np.ndarray] = None,
 ) -> Tuple[float, np.ndarray, np.ndarray, Dict[str, float]]:
     """
     Two-Tier Hierarchical Stacking Architecture:
-    Tier 1: Global Backbone in Logit Space (Stream A Free-Trees + Stream B Base-Margin Residuals).
+    Tier 1: Global Backbone in Logit Space (Stream A Free-Trees + Stream B Base-Margin Residuals + optional Stream D Neural).
     Tier 2: Gaussian Gated Refinement with Stream C (Boundary Specialist).
     """
     print("\n=================================================================")
@@ -501,22 +528,47 @@ def hierarchical_gated_blend(
     l_a_te = logit(a_te_c)
     l_b_te = logit(b_te_c)
 
-    # 1. Optimize Tier 1 Backbone (weight of A vs B)
-    def loss_tier1(w):
-        w_a = w[0]
-        w_b = 1.0 - w_a
-        l_back = w_a * l_a_oof + w_b * l_b_oof
-        p_back = expit(l_back)
-        return -roc_auc_score(y_true, p_back)
+    has_nn = stream_nn_oof is not None and stream_nn_test is not None
+    if has_nn:
+        nn_oof_c = np.clip(stream_nn_oof, eps, 1.0 - eps)
+        nn_te_c = np.clip(stream_nn_test, eps, 1.0 - eps)
+        l_nn_oof = logit(nn_oof_c)
+        l_nn_te = logit(nn_te_c)
 
-    res_tier1 = minimize(loss_tier1, [0.5], method="Nelder-Mead")
-    best_w_a = float(np.clip(res_tier1.x[0], 0.05, 0.95))
-    best_w_b = 1.0 - best_w_a
+        def loss_tier1_nn(w):
+            w_a, w_b, w_nn = w
+            l_back = w_a * l_a_oof + w_b * l_b_oof + w_nn * l_nn_oof
+            p_back = expit(l_back)
+            return -roc_auc_score(y_true, p_back)
 
-    oof_backbone = expit(best_w_a * l_a_oof + best_w_b * l_b_oof)
-    test_backbone = expit(best_w_a * l_a_te + best_w_b * l_b_te)
+        res_tier1 = minimize(
+            loss_tier1_nn,
+            [0.48, 0.48, 0.04],
+            method="SLSQP",
+            bounds=[(0.05, 0.90), (0.05, 0.90), (0.0, 0.10)],
+            constraints={"type": "eq", "fun": lambda w: np.sum(w) - 1.0},
+        )
+        best_w_a, best_w_b, best_w_nn = res_tier1.x
+        oof_backbone = expit(best_w_a * l_a_oof + best_w_b * l_b_oof + best_w_nn * l_nn_oof)
+        test_backbone = expit(best_w_a * l_a_te + best_w_b * l_b_te + best_w_nn * l_nn_te)
+        print(f"[Tier 1 Backbone] Weights: Stream A={best_w_a:.4f} | Stream B={best_w_b:.4f} | Stream D (Neural)={best_w_nn:.4f}")
+    else:
+        # 1. Optimize Tier 1 Backbone (weight of A vs B)
+        def loss_tier1(w):
+            w_a = w[0]
+            w_b = 1.0 - w_a
+            l_back = w_a * l_a_oof + w_b * l_b_oof
+            p_back = expit(l_back)
+            return -roc_auc_score(y_true, p_back)
+
+        res_tier1 = minimize(loss_tier1, [0.5], method="Nelder-Mead")
+        best_w_a = float(np.clip(res_tier1.x[0], 0.05, 0.95))
+        best_w_b = 1.0 - best_w_a
+        oof_backbone = expit(best_w_a * l_a_oof + best_w_b * l_b_oof)
+        test_backbone = expit(best_w_a * l_a_te + best_w_b * l_b_te)
+        print(f"[Tier 1 Backbone] Stream A Weight: {best_w_a:.4f} | Stream B Weight: {best_w_b:.4f}")
+
     backbone_auc = roc_auc_score(y_true, oof_backbone)
-    print(f"[Tier 1 Backbone] Stream A Weight: {best_w_a:.4f} | Stream B Weight: {best_w_b:.4f}")
     print(f"[Tier 1 Backbone] OOF ROC-AUC:    {backbone_auc:.6f}")
 
     # 2. Optimize Tier 2 Gaussian Gate: p_final = (1 - g(x)) * p_backbone + g(x) * p_boundary
@@ -538,6 +590,13 @@ def hierarchical_gated_blend(
     oof_final = (1.0 - g_tr) * oof_backbone + g_tr * bound_oof_c
     test_final = (1.0 - g_te) * test_backbone + g_te * bound_te_c
     final_auc = roc_auc_score(y_true, oof_final)
+
+    if final_auc < backbone_auc:
+        print(f"[-] Gated refinement ({final_auc:.6f}) <= backbone ({backbone_auc:.6f}). Preserving pristine global backbone.")
+        oof_final = oof_backbone
+        test_final = test_backbone
+        final_auc = backbone_auc
+        best_alpha = 0.0
 
     print(f"[Tier 2 Gate]     Optimal Alpha: {best_alpha:.4f} | Sigma: {best_sigma:.4f}")
     print(f"[Tier 2 Gated]    Final OOF ROC-AUC:  {final_auc:.6f} (+{final_auc - backbone_auc:+.6f} over backbone)")
@@ -708,6 +767,31 @@ def main():
         all_boundary_test += seed_c_test / total_seeds
 
     # -----------------------------------------------------------------
+    # OPTIONAL STREAM D: Neural Manifold Auto-Discovery
+    # -----------------------------------------------------------------
+    nn_oof = None
+    nn_test = None
+    nn_candidates = [
+        PROJECT_ROOT / "models" / "nn_tabular",
+        Path("/kaggle/working/electric-vehicle/models/nn_tabular"),
+        Path("/kaggle/working/models/nn_tabular"),
+    ]
+    for nnc in nn_candidates:
+        if (nnc / "oof_preds.parquet").exists() and (nnc / "test_preds.parquet").exists():
+            try:
+                df_nn_oof = pl.read_parquet(nnc / "oof_preds.parquet").to_pandas()
+                df_nn_test = pl.read_parquet(nnc / "test_preds.parquet").to_pandas()
+                col_oof = "pred" if "pred" in df_nn_oof.columns else ("oof_pred" if "oof_pred" in df_nn_oof.columns else df_nn_oof.columns[-1])
+                col_test = "pred" if "pred" in df_nn_test.columns else df_nn_test.columns[-1]
+                if len(df_nn_oof) == len(train_feat) and len(df_nn_test) == len(test_feat):
+                    nn_oof = df_nn_oof[col_oof].values.astype(np.float32)
+                    nn_test = df_nn_test[col_test].values.astype(np.float32)
+                    print(f"[+] Discovered & Integrated Stream D: Tabular Neural Network from {nnc}")
+                    break
+            except Exception as e:
+                print(f"[!] Note on neural tabular auto-discovery: {e}")
+
+    # -----------------------------------------------------------------
     # HIERARCHICAL GATED ENSEMBLE
     # -----------------------------------------------------------------
     final_auc, oof_final, test_final, meta = hierarchical_gated_blend(
@@ -720,6 +804,8 @@ def main():
         train_feat_y,
         recipe_diff_tr,
         recipe_diff_te,
+        stream_nn_oof=nn_oof,
+        stream_nn_test=nn_test,
     )
 
     # -----------------------------------------------------------------
