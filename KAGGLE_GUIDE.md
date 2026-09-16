@@ -35,10 +35,11 @@ In your Kaggle notebook, run:
 If you want to submit right away, you have `submission_grandmaster_meta_blend.csv` and `submission_dual_rank.csv` already generated with zero ties and uncorrupted ranks:
 ```python
 import pandas as pd
-# Verify clean 0-tie format
-df = pd.read_csv("/kaggle/working/electric-vehicle/submission_grandmaster_meta_blend.csv")
-print(f"Shape: {df.shape} | Unique ranks: {df['Will_Buy_EV'].nunique()}")
+# Load the uncorrupted 100-model meta-blend directly from tracked parquet
+df = pd.read_parquet("/kaggle/working/electric-vehicle/submission_grandmaster_meta_blend.parquet")
+print(f"Shape: {df.shape} | Unique ranks: {df['Will_Buy_EV'].nunique()} | Ties: {len(df) - df['Will_Buy_EV'].nunique()}")
 df.to_csv("/kaggle/working/submission.csv", index=False)
+print("Ready to submit /kaggle/working/submission.csv!")
 ```
 
 ### Step 3: Launch Grandmaster Top-1 Pipeline (LGBM GPU + CatBoost GPU + XGBoost GPU)
