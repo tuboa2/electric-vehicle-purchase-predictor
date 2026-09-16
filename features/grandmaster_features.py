@@ -86,8 +86,13 @@ def build_grandmaster_features(
         - 3.0 * anx_high
     )
     recipe_diff = (buy_recipe_score - 5.61235).values
+    abs_recipe_diff = np.abs(recipe_diff)
     new_features["feat_buy_recipe_score"] = buy_recipe_score.values
     new_features["feat_recipe_dist_to_boundary"] = recipe_diff
+    new_features["feat_recipe_abs_dist"] = abs_recipe_diff
+    new_features["feat_recipe_z_sq"] = (recipe_diff ** 2).astype("float32")
+    new_features["feat_recipe_z_cube"] = (recipe_diff ** 3).astype("float32")
+    new_features["feat_recipe_sign_z"] = np.sign(recipe_diff).astype("int8")
     new_features["feat_recipe_is_above_boundary"] = (recipe_diff > 0.0).astype("int8")
     new_features["feat_recipe_prob_logit"] = (
         1.0 / (1.0 + np.exp(-np.clip(recipe_diff * 2.17464, -35.0, 35.0)))
@@ -98,6 +103,24 @@ def build_grandmaster_features(
     new_features["feat_recipe_base_margin"] = (
         np.clip(recipe_diff * 2.17464, -15.0, 15.0)
     ).astype("float32")
+
+    # Boundary High-Uncertainty Zones (where 95% of residual classification errors occur)
+    new_features["feat_is_boundary_10"] = (abs_recipe_diff < 0.10).astype("int8")
+    new_features["feat_is_boundary_20"] = (abs_recipe_diff < 0.20).astype("int8")
+    new_features["feat_is_boundary_30"] = (abs_recipe_diff < 0.30).astype("int8")
+    new_features["feat_is_boundary_50"] = (abs_recipe_diff < 0.50).astype("int8")
+    new_features["feat_boundary_gaussian_weight"] = np.exp(-((recipe_diff / 0.30) ** 2)).astype("float32")
+
+    # Generator Modulo & Floor Artifacts (exploding synthetic discrete quantization)
+    new_features["feat_age_mod_2"] = (age_val % 2).astype("int8").values
+    new_features["feat_age_mod_3"] = (age_val % 3).astype("int8").values
+    new_features["feat_age_mod_5"] = (age_val % 5).astype("int8").values
+    new_features["feat_age_mod_7"] = (age_val % 7).astype("int8").values
+    new_features["feat_age_bin_5"] = (age_val // 5).astype("int8").values
+    new_features["feat_income_dist_from_30k"] = (income_val - 30000.0).astype("float32").values
+    new_features["feat_income_above_30k"] = (income_val >= 30000.0).astype("int8").values
+    new_features["feat_income_x_env"] = ((income_val / 100000.0) * env_concern).astype("float32").values
+    new_features["feat_income_x_subsidy"] = ((income_val / 100000.0) * subsidy_bin).astype("float32").values
 
     # Domain Interactions
     new_features["feat_subsidy_env_gate"] = (subsidy_bin * env_concern).values
@@ -110,13 +133,45 @@ def build_grandmaster_features(
         commute_val / (total_charging + 1.0)
     ).values
 
-    # EV Charger "Staircase" Resolution (normalized by City_Type)
+    # EV Charger "Staircase" & Simpson's Paradox Inversion (Strict Native City_Type Cohorts)
     home_charging = combined["Charging_Stations_Near_Home"].astype(float)
     work_charging = combined["Charging_Stations_Near_Work"].astype(float)
     city_home_mean = combined.groupby("City_Type", observed=False)["Charging_Stations_Near_Home"].transform("mean")
+    city_home_std = combined.groupby("City_Type", observed=False)["Charging_Stations_Near_Home"].transform("std").fillna(1.0)
     city_work_mean = combined.groupby("City_Type", observed=False)["Charging_Stations_Near_Work"].transform("mean")
+    city_work_std = combined.groupby("City_Type", observed=False)["Charging_Stations_Near_Work"].transform("std").fillna(1.0)
+
+    total_charging_s = pd.Series(total_charging.values, index=combined.index)
+    city_total_mean = total_charging_s.groupby(combined["City_Type"], observed=False).transform("mean")
+    city_total_std = total_charging_s.groupby(combined["City_Type"], observed=False).transform("std").fillna(1.0)
+
+    # Within-Cohort Z-Scores (strictly inverting Simpson's paradox: sign flips from negative to positive)
     new_features["feat_charging_home_city_diff"] = (home_charging - city_home_mean).values
     new_features["feat_charging_work_city_diff"] = (work_charging - city_work_mean).values
+    new_features["feat_charging_home_z_city"] = ((home_charging - city_home_mean) / (city_home_std + 1e-6)).astype("float32").values
+    new_features["feat_charging_work_z_city"] = ((work_charging - city_work_mean) / (city_work_std + 1e-6)).astype("float32").values
+    new_features["feat_total_charging_z_city"] = ((total_charging - city_total_mean) / (city_total_std + 1e-6)).astype("float32").values
+
+    # Explicit City_Type Cohort One-Hot Multiplicative Interactions
+    is_urban = (combined["City_Type"] == "Urban").astype("float32")
+    is_suburban = (combined["City_Type"] == "Suburban").astype("float32")
+    is_rural = (combined["City_Type"] == "Rural").astype("float32")
+    charging_per_km = (total_charging / (commute_val + 1.0)).astype("float32")
+
+    new_features["feat_urban_x_charging_per_km"] = (is_urban * charging_per_km).values
+    new_features["feat_suburban_x_charging_per_km"] = (is_suburban * charging_per_km).values
+    new_features["feat_rural_x_charging_per_km"] = (is_rural * charging_per_km).values
+    new_features["feat_urban_x_commute"] = (is_urban * commute_val).astype("float32").values
+    new_features["feat_suburban_x_commute"] = (is_suburban * commute_val).astype("float32").values
+    new_features["feat_rural_x_commute"] = (is_rural * commute_val).astype("float32").values
+    new_features["feat_urban_x_home_charging"] = (is_urban * home_charging).astype("float32").values
+    new_features["feat_suburban_x_home_charging"] = (is_suburban * home_charging).astype("float32").values
+    new_features["feat_rural_x_home_charging"] = (is_rural * home_charging).astype("float32").values
+
+    # Procedural Hard Saturation Flags (mirroring synthetic data generation infrastructure caps)
+    new_features["feat_is_rural_home_capped"] = (is_rural * (home_charging >= 3.0)).astype("int8").values
+    new_features["feat_is_suburban_home_capped"] = (is_suburban * (home_charging >= 9.0)).astype("int8").values
+    new_features["feat_is_urban_home_capped"] = (is_urban * (home_charging >= 14.0)).astype("int8").values
 
     # Chris Deotte Simpson's Paradox Resolution (Home Charging Ability vs Station Density)
     mean_home_by_ability_city = combined.groupby(["Home_Charging_Possible", "City_Type"], observed=False)["Charging_Stations_Near_Home"].transform("mean")

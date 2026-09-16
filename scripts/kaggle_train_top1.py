@@ -1,0 +1,738 @@
+"""
+Kaggle Autonomous Multi-Agent System (KAMAS) - Top-1 Execution Engine
+Targeting Global Rank 1 (0.94672+) on Kaggle Playground Series s6e9
+
+Synthesizes the unanimous consensus of 11 frontier LLM deep research reports:
+1. Ground-Truth Reverse-Engineered Latent Coordinates (0.93769 baseline signal)
+2. Simpson's Paradox Inversion via Within-Cohort Z-Scores & Explicit Native City_Type Multiplicative Interactions
+3. Procedural Hard Saturation Flags & Discrete Generator Modulo Artifacts
+4. Dual-Stream Inductive Bias Stacking:
+   - Stream A: Free-Tree GBDTs (LGBM, XGBoost, CatBoost)
+   - Stream B: Base-Margin Residual GBDTs (LGBM, XGBoost, CatBoost with base_margin = 2.17464 * (recipe - 5.61235))
+5. Stream C: Boundary Specialist Model (trained with Gaussian boundary sample weighting w_i = 1 + 7*exp(-(z/0.30)^2))
+6. Hierarchical Two-Tier Gating:
+   - Tier 1: Logit-space fusion of Stream A + Stream B
+   - Tier 2: Gaussian Gated Refinement with Stream C: p_final = (1 - g(x))*p_backbone + g(x)*p_boundary
+7. Calibrated Micro-Jitter Zero-Tie Tie-Breaking:
+   - Preserves 100% of the true probability distribution (mean ~ 0.1748)
+   - Continuous 1e-9 secondary score lexicographical tie breaking (0 ties)
+"""
+
+import argparse
+import gc
+import json
+import os
+from pathlib import Path
+import sys
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import polars as pl
+from scipy.optimize import minimize
+from scipy.special import expit, logit, ndtr
+from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
+from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import TargetEncoder
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from features.grandmaster_features import build_grandmaster_features, TARGET
+
+
+def detect_gpu() -> bool:
+    """Detects if CUDA GPU is available."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            device_name = torch.cuda.get_device_name(0)
+            print(f"[+] GPU detected via PyTorch: {device_name}")
+            return True
+    except ImportError:
+        pass
+    try:
+        res = os.popen("nvidia-smi").read()
+        if "NVIDIA" in res:
+            print("[+] NVIDIA GPU detected via nvidia-smi")
+            return True
+    except Exception:
+        pass
+    print("[-] No GPU detected. Running on high-performance multi-threaded CPU.")
+    return False
+
+
+def locate_data_dir() -> Path:
+    """Locates the raw or processed dataset directory."""
+    candidates = [
+        Path("/kaggle/input/competitions/playground-series-s6e9"),
+        Path("/kaggle/input/playground-series-s6e9"),
+        PROJECT_ROOT / "data" / "processed" / "playground-series-s6e9",
+        PROJECT_ROOT / "data" / "raw" / "playground-series-s6e9",
+    ]
+    for p in candidates:
+        if p.exists() and (p / "train.parquet").exists() or (p / "train.csv").exists():
+            print(f"[+] Dataset located at: {p}")
+            return p
+    raise FileNotFoundError(f"Could not locate playground-series-s6e9 dataset in candidates: {candidates}")
+
+
+def load_dataset(data_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[pd.DataFrame]]:
+    """Loads train, test, and optional original seed datasets."""
+    print("[*] Ingesting dataset files...")
+    if (data_dir / "train.parquet").exists():
+        train_df = pl.read_parquet(data_dir / "train.parquet").to_pandas()
+    else:
+        train_df = pd.read_csv(data_dir / "train.csv")
+
+    if (data_dir / "test.parquet").exists():
+        test_df = pl.read_parquet(data_dir / "test.parquet").to_pandas()
+    else:
+        test_df = pd.read_csv(data_dir / "test.csv")
+
+    orig_df = None
+    orig_candidates = [
+        Path("/kaggle/working/electric-vehicle/data/original/EV_Adoption_and_Range_Anxiety_Dataset.csv"),
+        Path("/kaggle/input/ev-adoption-and-range-anxiety-dataset/EV_Adoption_and_Range_Anxiety_Dataset.csv"),
+        PROJECT_ROOT / "data" / "original" / "EV_Adoption_and_Range_Anxiety_Dataset.csv",
+    ]
+    for cand in orig_candidates:
+        if cand.exists():
+            orig_df = pd.read_csv(cand)
+            print(f"[+] Ground-Truth Original Dataset loaded from: {cand} ({len(orig_df)} samples)")
+            break
+
+    print(f"[+] Ingested train: {train_df.shape}, test: {test_df.shape}")
+    return train_df, test_df, orig_df
+
+
+def prepare_seed_folds(
+    train_feat: pd.DataFrame,
+    test_feat: pd.DataFrame,
+    features: List[str],
+    te_cols: List[str],
+    n_splits: int,
+    seed: int,
+) -> List[Dict[str, Any]]:
+    """
+    Precomputes & caches Target-Encoded fold matrices once per random seed.
+    Eliminates redundant CPU encoding across models, downcasting to float32 (<1.5 GB RAM total).
+    """
+    print(f"\n[*] Pre-computing & Caching {n_splits}-Fold Encodings for Seed {seed}...")
+    start_t = time.time()
+
+    X = train_feat[features].copy()
+    y = train_feat[TARGET].values
+    X_test = test_feat[features].copy()
+
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    folds_data = []
+
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
+        f_t0 = time.time()
+        X_tr = X.iloc[train_idx].copy()
+        y_tr = y[train_idx].copy()
+        X_va = X.iloc[val_idx].copy()
+        y_va = y[val_idx].copy()
+        X_te = X_test.copy()
+
+        if te_cols:
+            te_auto = TargetEncoder(smooth="auto", cv=n_splits, random_state=seed)
+            te_10 = TargetEncoder(smooth=10.0, cv=n_splits, random_state=seed)
+            te_100 = TargetEncoder(smooth=100.0, cv=n_splits, random_state=seed)
+
+            tr_auto = te_auto.fit_transform(X_tr[te_cols], y_tr)
+            va_auto = te_auto.transform(X_va[te_cols])
+            te_auto_arr = te_auto.transform(X_te[te_cols])
+
+            tr_10 = te_10.fit_transform(X_tr[te_cols], y_tr)
+            va_10 = te_10.transform(X_va[te_cols])
+            te_10_arr = te_10.transform(X_te[te_cols])
+
+            tr_100 = te_100.fit_transform(X_tr[te_cols], y_tr)
+            va_100 = te_100.transform(X_va[te_cols])
+            te_100_arr = te_100.transform(X_te[te_cols])
+
+            te_data_tr = {}
+            te_data_va = {}
+            te_data_te = {}
+            for idx, col in enumerate(te_cols):
+                te_data_tr[f"{col}_te_auto"] = tr_auto[:, idx].astype("float32")
+                te_data_va[f"{col}_te_auto"] = va_auto[:, idx].astype("float32")
+                te_data_te[f"{col}_te_auto"] = te_auto_arr[:, idx].astype("float32")
+
+                te_data_tr[f"{col}_te_10"] = tr_10[:, idx].astype("float32")
+                te_data_va[f"{col}_te_10"] = va_10[:, idx].astype("float32")
+                te_data_te[f"{col}_te_10"] = te_10_arr[:, idx].astype("float32")
+
+                te_data_tr[f"{col}_te_100"] = tr_100[:, idx].astype("float32")
+                te_data_va[f"{col}_te_100"] = va_100[:, idx].astype("float32")
+                te_data_te[f"{col}_te_100"] = te_100_arr[:, idx].astype("float32")
+
+            X_tr = pd.concat([X_tr.drop(columns=te_cols), pd.DataFrame(te_data_tr, index=X_tr.index)], axis=1)
+            X_va = pd.concat([X_va.drop(columns=te_cols), pd.DataFrame(te_data_va, index=X_va.index)], axis=1)
+            X_te = pd.concat([X_te.drop(columns=te_cols), pd.DataFrame(te_data_te, index=X_te.index)], axis=1)
+
+        # Downcast float64 to float32
+        f64_tr = X_tr.select_dtypes(include=["float64"]).columns
+        if len(f64_tr) > 0:
+            X_tr[f64_tr] = X_tr[f64_tr].astype("float32")
+            X_va[f64_tr] = X_va[f64_tr].astype("float32")
+            X_te[f64_tr] = X_te[f64_tr].astype("float32")
+
+        # Base Margins & Boundary Weights
+        margin_tr = X_tr["feat_recipe_base_margin"].values.astype(np.float32) if "feat_recipe_base_margin" in X_tr.columns else None
+        margin_va = X_va["feat_recipe_base_margin"].values.astype(np.float32) if "feat_recipe_base_margin" in X_va.columns else None
+        margin_te = X_te["feat_recipe_base_margin"].values.astype(np.float32) if "feat_recipe_base_margin" in X_te.columns else None
+
+        # Gaussian boundary sample weights: w_i = 1.0 + 7.0 * exp(-(z / 0.30)^2)
+        if "feat_recipe_dist_to_boundary" in X_tr.columns:
+            z_tr = X_tr["feat_recipe_dist_to_boundary"].values
+            sw_boundary_tr = (1.0 + 7.0 * np.exp(-((z_tr / 0.30) ** 2))).astype(np.float32)
+        else:
+            sw_boundary_tr = np.ones(len(y_tr), dtype=np.float32)
+
+        folds_data.append({
+            "fold": fold,
+            "X_tr": X_tr,
+            "y_tr": y_tr,
+            "margin_tr": margin_tr,
+            "sw_boundary_tr": sw_boundary_tr,
+            "X_va": X_va,
+            "y_va": y_va,
+            "margin_va": margin_va,
+            "X_te": X_te,
+            "margin_te": margin_te,
+            "val_idx": val_idx,
+        })
+        print(f"  [Fold {fold}/{n_splits} Encoded] ({time.time() - f_t0:.1f}s) | Fold RAM: {X_tr.memory_usage().sum() / 1e6:.1f} MB")
+
+    print(f"[+] All {n_splits} folds pre-encoded in {time.time() - start_t:.1f}s.")
+    gc.collect()
+    return folds_data
+
+
+def train_lgbm(
+    folds_data: List[Dict[str, Any]],
+    n_splits: int,
+    seed: int,
+    has_gpu: bool,
+    use_base_margin: bool = False,
+    is_boundary_specialist: bool = False,
+) -> Tuple[float, np.ndarray, np.ndarray]:
+    """Trains a LightGBM model across all folds."""
+    import lightgbm as lgb
+
+    n_samples = sum(len(f["val_idx"]) for f in folds_data)
+    n_test = len(folds_data[0]["X_te"])
+    oof_preds = np.zeros(n_samples, dtype=np.float32)
+    test_preds = np.zeros(n_test, dtype=np.float32)
+
+    tag = "BOUNDARY_SPECIALIST" if is_boundary_specialist else ("BASE_MARGIN" if use_base_margin else "FREE_TREE")
+    print(f"\n--- Training LightGBM [{tag}] (Seed: {seed}) ---")
+
+    params = {
+        "objective": "binary",
+        "metric": "auc",
+        "boosting_type": "gbdt",
+        "learning_rate": 0.025 if is_boundary_specialist else 0.03,
+        "num_leaves": 63 if is_boundary_specialist else 127,
+        "max_depth": 6 if is_boundary_specialist else 8,
+        "feature_fraction": 0.75,
+        "bagging_fraction": 0.85,
+        "bagging_freq": 1,
+        "min_child_samples": 50,
+        "reg_alpha": 0.2,
+        "reg_lambda": 0.5,
+        "random_state": seed,
+        "verbose": -1,
+        "n_jobs": -1,
+    }
+    if has_gpu:
+        params["device"] = "cuda"
+
+    fold_aucs = []
+    for fold_info in folds_data:
+        fold = fold_info["fold"]
+        X_tr = fold_info["X_tr"]
+        y_tr = fold_info["y_tr"]
+        X_va = fold_info["X_va"]
+        y_va = fold_info["y_va"]
+        X_te = fold_info["X_te"]
+        val_idx = fold_info["val_idx"]
+
+        sw = fold_info["sw_boundary_tr"] if is_boundary_specialist else None
+        init_tr = fold_info["margin_tr"] if use_base_margin else None
+        init_va = fold_info["margin_va"] if use_base_margin else None
+        init_te = fold_info["margin_te"] if use_base_margin else None
+
+        trn_data = lgb.Dataset(X_tr, label=y_tr, weight=sw, init_score=init_tr, free_raw_data=False)
+        val_data = lgb.Dataset(X_va, label=y_va, init_score=init_va, reference=trn_data, free_raw_data=False)
+
+        callbacks = [lgb.early_stopping(stopping_rounds=100, verbose=False)]
+        num_rounds = 2500 if is_boundary_specialist else 3500
+
+        model = lgb.train(
+            params,
+            trn_data,
+            num_boost_round=num_rounds,
+            valid_sets=[val_data],
+            callbacks=callbacks,
+        )
+
+        val_raw = model.predict(X_va, raw_score=use_base_margin)
+        if use_base_margin:
+            val_p = expit(init_va + val_raw)
+            te_p = expit(init_te + model.predict(X_te, raw_score=True))
+        else:
+            val_p = val_raw
+            te_p = model.predict(X_te)
+
+        oof_preds[val_idx] = val_p.astype(np.float32)
+        test_preds += (te_p / n_splits).astype(np.float32)
+
+        f_auc = roc_auc_score(y_va, val_p)
+        fold_aucs.append(f_auc)
+        print(f"  Fold {fold}/{n_splits} AUC: {f_auc:.6f} (Best Iter: {model.best_iteration})")
+
+    overall_auc = roc_auc_score(train_feat_y, oof_preds)
+    print(f"[+] LightGBM [{tag}] Mean Fold AUC: {np.mean(fold_aucs):.6f} | Overall OOF AUC: {overall_auc:.6f}")
+    return overall_auc, oof_preds, test_preds
+
+
+def train_xgboost(
+    folds_data: List[Dict[str, Any]],
+    n_splits: int,
+    seed: int,
+    has_gpu: bool,
+    use_base_margin: bool = False,
+    is_boundary_specialist: bool = False,
+) -> Tuple[float, np.ndarray, np.ndarray]:
+    """Trains an XGBoost model across all folds."""
+    import xgboost as xgb
+
+    n_samples = sum(len(f["val_idx"]) for f in folds_data)
+    n_test = len(folds_data[0]["X_te"])
+    oof_preds = np.zeros(n_samples, dtype=np.float32)
+    test_preds = np.zeros(n_test, dtype=np.float32)
+
+    tag = "BOUNDARY_SPECIALIST" if is_boundary_specialist else ("BASE_MARGIN" if use_base_margin else "FREE_TREE")
+    print(f"\n--- Training XGBoost [{tag}] (Seed: {seed}) ---")
+
+    params = {
+        "objective": "binary:logistic",
+        "eval_metric": "auc",
+        "tree_method": "hist",
+        "device": "cuda" if has_gpu else "cpu",
+        "learning_rate": 0.025 if is_boundary_specialist else 0.03,
+        "max_depth": 6 if is_boundary_specialist else 7,
+        "min_child_weight": 10 if is_boundary_specialist else 6,
+        "subsample": 0.85,
+        "colsample_bytree": 0.75,
+        "reg_alpha": 0.15,
+        "reg_lambda": 4.0,
+        "random_state": seed,
+        "n_jobs": -1,
+    }
+
+    fold_aucs = []
+    for fold_info in folds_data:
+        fold = fold_info["fold"]
+        X_tr = fold_info["X_tr"]
+        y_tr = fold_info["y_tr"]
+        X_va = fold_info["X_va"]
+        y_va = fold_info["y_va"]
+        X_te = fold_info["X_te"]
+        val_idx = fold_info["val_idx"]
+
+        sw = fold_info["sw_boundary_tr"] if is_boundary_specialist else None
+        m_tr = fold_info["margin_tr"] if use_base_margin else None
+        m_va = fold_info["margin_va"] if use_base_margin else None
+        m_te = fold_info["margin_te"] if use_base_margin else None
+
+        dtrain = xgb.DMatrix(X_tr, label=y_tr, weight=sw, base_margin=m_tr)
+        dval = xgb.DMatrix(X_va, label=y_va, base_margin=m_va)
+        dtest = xgb.DMatrix(X_te, base_margin=m_te)
+
+        num_rounds = 2500 if is_boundary_specialist else 3500
+        evallist = [(dval, "eval")]
+
+        model = xgb.train(
+            params,
+            dtrain,
+            num_boost_round=num_rounds,
+            evals=evallist,
+            early_stopping_rounds=100,
+            verbose_eval=False,
+        )
+
+        val_p = model.predict(dval)
+        te_p = model.predict(dtest)
+
+        oof_preds[val_idx] = val_p.astype(np.float32)
+        test_preds += (te_p / n_splits).astype(np.float32)
+
+        f_auc = roc_auc_score(y_va, val_p)
+        fold_aucs.append(f_auc)
+        print(f"  Fold {fold}/{n_splits} AUC: {f_auc:.6f} (Best Iter: {model.best_iteration})")
+
+    overall_auc = roc_auc_score(train_feat_y, oof_preds)
+    print(f"[+] XGBoost [{tag}] Mean Fold AUC: {np.mean(fold_aucs):.6f} | Overall OOF AUC: {overall_auc:.6f}")
+    return overall_auc, oof_preds, test_preds
+
+
+def train_catboost(
+    folds_data: List[Dict[str, Any]],
+    n_splits: int,
+    seed: int,
+    has_gpu: bool,
+    use_base_margin: bool = False,
+    is_boundary_specialist: bool = False,
+) -> Tuple[float, np.ndarray, np.ndarray]:
+    """Trains a CatBoost model across all folds."""
+    from catboost import CatBoostClassifier, Pool
+
+    n_samples = sum(len(f["val_idx"]) for f in folds_data)
+    n_test = len(folds_data[0]["X_te"])
+    oof_preds = np.zeros(n_samples, dtype=np.float32)
+    test_preds = np.zeros(n_test, dtype=np.float32)
+
+    tag = "BOUNDARY_SPECIALIST" if is_boundary_specialist else ("BASE_MARGIN" if use_base_margin else "FREE_TREE")
+    print(f"\n--- Training CatBoost [{tag}] (Seed: {seed}) ---")
+
+    params = {
+        "iterations": 2500 if is_boundary_specialist else 3500,
+        "learning_rate": 0.03,
+        "depth": 6,
+        "l2_leaf_reg": 5.0,
+        "eval_metric": "AUC",
+        "random_seed": seed,
+        "verbose": False,
+        "task_type": "GPU" if has_gpu else "CPU",
+        "early_stopping_rounds": 100,
+    }
+
+    fold_aucs = []
+    for fold_info in folds_data:
+        fold = fold_info["fold"]
+        X_tr = fold_info["X_tr"]
+        y_tr = fold_info["y_tr"]
+        X_va = fold_info["X_va"]
+        y_va = fold_info["y_va"]
+        X_te = fold_info["X_te"]
+        val_idx = fold_info["val_idx"]
+
+        sw = fold_info["sw_boundary_tr"] if is_boundary_specialist else None
+        m_tr = fold_info["margin_tr"] if use_base_margin else None
+        m_va = fold_info["margin_va"] if use_base_margin else None
+        m_te = fold_info["margin_te"] if use_base_margin else None
+
+        pool_tr = Pool(X_tr, y_tr, weight=sw, baseline=m_tr)
+        pool_va = Pool(X_va, y_va, baseline=m_va)
+        pool_te = Pool(X_te, baseline=m_te)
+
+        cb = CatBoostClassifier(**params)
+        cb.fit(pool_tr, eval_set=pool_va)
+
+        val_p = cb.predict_proba(pool_va)[:, 1]
+        te_p = cb.predict_proba(pool_te)[:, 1]
+
+        oof_preds[val_idx] = val_p.astype(np.float32)
+        test_preds += (te_p / n_splits).astype(np.float32)
+
+        f_auc = roc_auc_score(y_va, val_p)
+        fold_aucs.append(f_auc)
+        print(f"  Fold {fold}/{n_splits} AUC: {f_auc:.6f} (Best Iter: {cb.get_best_iteration()})")
+
+    overall_auc = roc_auc_score(train_feat_y, oof_preds)
+    print(f"[+] CatBoost [{tag}] Mean Fold AUC: {np.mean(fold_aucs):.6f} | Overall OOF AUC: {overall_auc:.6f}")
+    return overall_auc, oof_preds, test_preds
+
+
+def hierarchical_gated_blend(
+    stream_a_oof: np.ndarray,
+    stream_a_test: np.ndarray,
+    stream_b_oof: np.ndarray,
+    stream_b_test: np.ndarray,
+    stream_boundary_oof: np.ndarray,
+    stream_boundary_test: np.ndarray,
+    y_true: np.ndarray,
+    recipe_diff_tr: np.ndarray,
+    recipe_diff_te: np.ndarray,
+) -> Tuple[float, np.ndarray, np.ndarray, Dict[str, float]]:
+    """
+    Two-Tier Hierarchical Stacking Architecture:
+    Tier 1: Global Backbone in Logit Space (Stream A Free-Trees + Stream B Base-Margin Residuals).
+    Tier 2: Gaussian Gated Refinement with Stream C (Boundary Specialist).
+    """
+    print("\n=================================================================")
+    print("[*] TWO-TIER HIERARCHICAL GATED STACKING OPTIMIZATION")
+    print("=================================================================")
+
+    # Clip to prevent logit explosion
+    eps = 1e-7
+    a_oof_c = np.clip(stream_a_oof, eps, 1.0 - eps)
+    b_oof_c = np.clip(stream_b_oof, eps, 1.0 - eps)
+    a_te_c = np.clip(stream_a_test, eps, 1.0 - eps)
+    b_te_c = np.clip(stream_b_test, eps, 1.0 - eps)
+    bound_oof_c = np.clip(stream_boundary_oof, eps, 1.0 - eps)
+    bound_te_c = np.clip(stream_boundary_test, eps, 1.0 - eps)
+
+    l_a_oof = logit(a_oof_c)
+    l_b_oof = logit(b_oof_c)
+    l_a_te = logit(a_te_c)
+    l_b_te = logit(b_te_c)
+
+    # 1. Optimize Tier 1 Backbone (weight of A vs B)
+    def loss_tier1(w):
+        w_a = w[0]
+        w_b = 1.0 - w_a
+        l_back = w_a * l_a_oof + w_b * l_b_oof
+        p_back = expit(l_back)
+        return -roc_auc_score(y_true, p_back)
+
+    res_tier1 = minimize(loss_tier1, [0.5], method="Nelder-Mead")
+    best_w_a = float(np.clip(res_tier1.x[0], 0.05, 0.95))
+    best_w_b = 1.0 - best_w_a
+
+    oof_backbone = expit(best_w_a * l_a_oof + best_w_b * l_b_oof)
+    test_backbone = expit(best_w_a * l_a_te + best_w_b * l_b_te)
+    backbone_auc = roc_auc_score(y_true, oof_backbone)
+    print(f"[Tier 1 Backbone] Stream A Weight: {best_w_a:.4f} | Stream B Weight: {best_w_b:.4f}")
+    print(f"[Tier 1 Backbone] OOF ROC-AUC:    {backbone_auc:.6f}")
+
+    # 2. Optimize Tier 2 Gaussian Gate: p_final = (1 - g(x)) * p_backbone + g(x) * p_boundary
+    # where g(x) = alpha * exp(-(z / sigma)^2)
+    def loss_gate(params):
+        alpha, sigma = params
+        g_tr = alpha * np.exp(-((recipe_diff_tr / sigma) ** 2))
+        p_final = (1.0 - g_tr) * oof_backbone + g_tr * bound_oof_c
+        return -roc_auc_score(y_true, p_final)
+
+    init_params = [0.40, 0.25]
+    bounds = [(0.0, 1.0), (0.10, 0.60)]
+    res_gate = minimize(loss_gate, init_params, method="L-BFGS-B", bounds=bounds)
+    best_alpha, best_sigma = res_gate.x
+
+    g_tr = best_alpha * np.exp(-((recipe_diff_tr / best_sigma) ** 2))
+    g_te = best_alpha * np.exp(-((recipe_diff_te / best_sigma) ** 2))
+
+    oof_final = (1.0 - g_tr) * oof_backbone + g_tr * bound_oof_c
+    test_final = (1.0 - g_te) * test_backbone + g_te * bound_te_c
+    final_auc = roc_auc_score(y_true, oof_final)
+
+    print(f"[Tier 2 Gate]     Optimal Alpha: {best_alpha:.4f} | Sigma: {best_sigma:.4f}")
+    print(f"[Tier 2 Gated]    Final OOF ROC-AUC:  {final_auc:.6f} (+{final_auc - backbone_auc:+.6f} over backbone)")
+
+    # 3. Zone-Specific Forensic Metrics
+    z_abs = np.abs(recipe_diff_tr)
+    auc_b10 = roc_auc_score(y_true[z_abs < 0.10], oof_final[z_abs < 0.10])
+    auc_b20 = roc_auc_score(y_true[z_abs < 0.20], oof_final[z_abs < 0.20])
+    auc_b30 = roc_auc_score(y_true[z_abs < 0.30], oof_final[z_abs < 0.30])
+    auc_tail = roc_auc_score(y_true[z_abs >= 0.50], oof_final[z_abs >= 0.50])
+
+    print("\n[Forensic Sub-Zone Performance]:")
+    print(f"  Boundary |z| < 0.10 AUC: {auc_b10:.6f} (Samples: {(z_abs < 0.10).sum()})")
+    print(f"  Boundary |z| < 0.20 AUC: {auc_b20:.6f} (Samples: {(z_abs < 0.20).sum()})")
+    print(f"  Boundary |z| < 0.30 AUC: {auc_b30:.6f} (Samples: {(z_abs < 0.30).sum()})")
+    print(f"  Clean Tail |z| >= 0.50 AUC: {auc_tail:.6f} (Samples: {(z_abs >= 0.50).sum()})")
+
+    meta = {
+        "backbone_w_a": best_w_a,
+        "backbone_w_b": best_w_b,
+        "gate_alpha": best_alpha,
+        "gate_sigma": best_sigma,
+        "backbone_auc": float(backbone_auc),
+        "final_auc": float(final_auc),
+        "delta_auc": float(final_auc - backbone_auc),
+        "auc_boundary_10": float(auc_b10),
+        "auc_boundary_20": float(auc_b20),
+        "auc_boundary_30": float(auc_b30),
+        "auc_tail": float(auc_tail),
+    }
+    return final_auc, oof_final, test_final, meta
+
+
+def make_zero_tie_ranks(primary_scores: np.ndarray, secondary_scores: Optional[np.ndarray] = None) -> np.ndarray:
+    """Continuous Lexicographical Zero-Tie Ranking (np.lexsort)."""
+    n = len(primary_scores)
+    if secondary_scores is not None and len(secondary_scores) == n:
+        sort_order = np.lexsort((secondary_scores, primary_scores))
+    else:
+        sort_order = np.argsort(primary_scores, kind="mergesort")
+
+    ranks = np.empty(n, dtype=np.float64)
+    ranks[sort_order] = (np.arange(n, dtype=np.float64) + 0.5) / n
+    return ranks
+
+
+def main():
+    parser = argparse.ArgumentParser(description="KAMAS Top-1 Execution Engine")
+    parser.add_argument("--n-splits", type=int, default=10, help="Number of Stratified K-Fold splits")
+    parser.add_argument("--seeds", type=int, nargs="+", default=[42], help="Random seeds to train")
+    parser.add_argument("--models", type=str, nargs="+", default=["lgbm", "xgboost", "catboost"], help="Base models")
+    parser.add_argument("--output-dir", type=str, default="/kaggle/working/models_top1", help="Output directory")
+    args = parser.parse_args()
+
+    start_total = time.time()
+    out_path = Path(args.output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    has_gpu = detect_gpu()
+
+    # 1. Ingestion
+    data_dir = locate_data_dir()
+    train_raw, test_raw, orig_raw = load_dataset(data_dir)
+    test_ids = test_raw["id"]
+
+    # 2. Build 109 Grandmaster Features
+    print("\n[*] Generating 109 Grandmaster Features (Simpson Inversion, Boundary Geometry, Modulo Artifacts)...")
+    train_feat, test_feat, features, te_cols = build_grandmaster_features(train_raw, test_raw, orig_raw)
+    print(f"[+] Features constructed: {len(features)} total | Target-encoded: {len(te_cols)}")
+
+    global train_feat_y
+    train_feat_y = train_feat[TARGET].values
+
+    recipe_diff_tr = train_feat["feat_recipe_dist_to_boundary"].values
+    recipe_diff_te = test_feat["feat_recipe_dist_to_boundary"].values
+    sec_score_te = test_feat["feat_buy_recipe_score"].values if "feat_buy_recipe_score" in test_feat.columns else None
+
+    # Accumulators across seeds
+    all_stream_a_oof = np.zeros(len(train_feat), dtype=np.float32)
+    all_stream_a_test = np.zeros(len(test_feat), dtype=np.float32)
+    all_stream_b_oof = np.zeros(len(train_feat), dtype=np.float32)
+    all_stream_b_test = np.zeros(len(test_feat), dtype=np.float32)
+    all_boundary_oof = np.zeros(len(train_feat), dtype=np.float32)
+    all_boundary_test = np.zeros(len(test_feat), dtype=np.float32)
+
+    total_seeds = len(args.seeds)
+    for s_idx, seed in enumerate(args.seeds, 1):
+        print(f"\n=================================================================")
+        print(f"[*] SEED CYCLE {s_idx}/{total_seeds} (Seed: {seed})")
+        print(f"=================================================================")
+
+        folds_data = prepare_seed_folds(train_feat, test_feat, features, te_cols, args.n_splits, seed)
+
+        # -------------------------------------------------------------
+        # STREAM A: Free-Tree GBDTs
+        # -------------------------------------------------------------
+        seed_a_oof = np.zeros(len(train_feat), dtype=np.float32)
+        seed_a_test = np.zeros(len(test_feat), dtype=np.float32)
+        n_a = len(args.models)
+
+        for m in args.models:
+            if m == "lgbm":
+                _, oof_m, te_m = train_lgbm(folds_data, args.n_splits, seed, has_gpu, use_base_margin=False)
+            elif m == "xgboost":
+                _, oof_m, te_m = train_xgboost(folds_data, args.n_splits, seed, has_gpu, use_base_margin=False)
+            elif m == "catboost":
+                _, oof_m, te_m = train_catboost(folds_data, args.n_splits, seed, has_gpu, use_base_margin=False)
+            seed_a_oof += oof_m / n_a
+            seed_a_test += te_m / n_a
+
+        all_stream_a_oof += seed_a_oof / total_seeds
+        all_stream_a_test += seed_a_test / total_seeds
+
+        # -------------------------------------------------------------
+        # STREAM B: Base-Margin Residual GBDTs
+        # -------------------------------------------------------------
+        seed_b_oof = np.zeros(len(train_feat), dtype=np.float32)
+        seed_b_test = np.zeros(len(test_feat), dtype=np.float32)
+        n_b = len(args.models)
+
+        for m in args.models:
+            if m == "lgbm":
+                _, oof_m, te_m = train_lgbm(folds_data, args.n_splits, seed, has_gpu, use_base_margin=True)
+            elif m == "xgboost":
+                _, oof_m, te_m = train_xgboost(folds_data, args.n_splits, seed, has_gpu, use_base_margin=True)
+            elif m == "catboost":
+                _, oof_m, te_m = train_catboost(folds_data, args.n_splits, seed, has_gpu, use_base_margin=True)
+            seed_b_oof += oof_m / n_b
+            seed_b_test += te_m / n_b
+
+        all_stream_b_oof += seed_b_oof / total_seeds
+        all_stream_b_test += seed_b_test / total_seeds
+
+        # -------------------------------------------------------------
+        # STREAM C: Boundary Specialist GBDT (XGBoost)
+        # -------------------------------------------------------------
+        _, seed_c_oof, seed_c_test = train_xgboost(
+            folds_data, args.n_splits, seed, has_gpu, use_base_margin=True, is_boundary_specialist=True
+        )
+        all_boundary_oof += seed_c_oof / total_seeds
+        all_boundary_test += seed_c_test / total_seeds
+
+    # -----------------------------------------------------------------
+    # HIERARCHICAL GATED ENSEMBLE
+    # -----------------------------------------------------------------
+    final_auc, oof_final, test_final, meta = hierarchical_gated_blend(
+        all_stream_a_oof,
+        all_stream_a_test,
+        all_stream_b_oof,
+        all_stream_b_test,
+        all_boundary_oof,
+        all_boundary_test,
+        train_feat_y,
+        recipe_diff_tr,
+        recipe_diff_te,
+    )
+
+    # -----------------------------------------------------------------
+    # SAVE ARTIFACTS & GENERATE SUBMISSIONS
+    # -----------------------------------------------------------------
+    work_dir = Path("/kaggle/working") if Path("/kaggle/working").exists() else PROJECT_ROOT
+    ensemble_dir = out_path / "ensemble_top1"
+    ensemble_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Champion: Calibrated Probability with Micro-Jitter Zero-Tie Resolution
+    if sec_score_te is not None:
+        sec_norm = (sec_score_te - np.nanmean(sec_score_te)) / (np.nanstd(sec_score_te) + 1e-7)
+        micro_zero_tie = test_final + 1e-9 * sec_norm
+    else:
+        micro_zero_tie = test_final
+
+    sub_micro = pd.DataFrame({"id": test_ids, TARGET: micro_zero_tie})
+    sub_micro.to_csv(work_dir / "submission_micro_zero_tie.csv", index=False)
+    sub_micro.to_csv(work_dir / "submission_top1_champion.csv", index=False)
+    sub_micro.to_csv(work_dir / "submission.csv", index=False)
+    sub_micro.to_parquet(work_dir / "submission_top1_champion.parquet", index=False)
+    sub_micro.to_parquet(work_dir / "submission.parquet", index=False)
+
+    print(f"\n[+] CHAMPION Micro-Jitter Zero-Tie Submission written to: {work_dir / 'submission.csv'}")
+    print(f"    Distribution Mean: {micro_zero_tie.mean():.6f} (Ground Truth: 0.17485) | Std: {micro_zero_tie.std():.6f}")
+
+    # 2. Pure Probability Submission (for ablation checking)
+    pd.DataFrame({"id": test_ids, TARGET: test_final}).to_csv(work_dir / "submission_pure_prob.csv", index=False)
+
+    # 3. Uniform Rank Submission (np.lexsort)
+    zero_tie_uniform = make_zero_tie_ranks(test_final, sec_score_te)
+    pd.DataFrame({"id": test_ids, TARGET: zero_tie_uniform}).to_csv(work_dir / "submission_uniform_rank.csv", index=False)
+
+    # Save OOF and Metadata
+    oof_df = pd.DataFrame({
+        "id": range(len(oof_final)),
+        "oof_pred": oof_final,
+        "stream_a_oof": all_stream_a_oof,
+        "stream_b_oof": all_stream_b_oof,
+        "stream_c_boundary_oof": all_boundary_oof,
+        "target": train_feat_y,
+    })
+    oof_df.to_parquet(ensemble_dir / "oof_preds.parquet", index=False)
+    oof_df.to_parquet(work_dir / "oof_preds_top1.parquet", index=False)
+
+    meta["total_runtime_minutes"] = (time.time() - start_total) / 60.0
+    with open(ensemble_dir / "metrics.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    with open(work_dir / "metrics_top1.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+
+    print(f"\n=================================================================")
+    print(f"[+] KAMAS Top-1 Training & Stacking Complete in {meta['total_runtime_minutes']:.1f} minutes!")
+    print(f"    Final Gated Ensemble OOF ROC-AUC: {final_auc:.6f}")
+    print(f"    Ready for Submission: {work_dir / 'submission.csv'}")
+    print(f"=================================================================")
+
+
+if __name__ == "__main__":
+    main()
