@@ -64,6 +64,113 @@ def detect_gpu() -> bool:
     return False
 
 
+_LGBM_DEVICE_CACHE: Optional[str] = None
+_XGB_DEVICE_CACHE: Optional[str] = None
+_CB_DEVICE_CACHE: Optional[str] = None
+
+
+def probe_lgbm_device(has_gpu: bool) -> str:
+    """
+    Safely probes whether LightGBM has CUDA GPU tree learner enabled in its binary.
+    Gracefully falls back to high-performance multi-threaded CPU if not compiled in.
+    """
+    global _LGBM_DEVICE_CACHE
+    if _LGBM_DEVICE_CACHE is not None:
+        return _LGBM_DEVICE_CACHE
+
+    if not has_gpu:
+        _LGBM_DEVICE_CACHE = "cpu"
+        return "cpu"
+
+    try:
+        import lightgbm as lgb
+        X_micro = np.random.randn(20, 2).astype(np.float32)
+        y_micro = np.array([0, 1] * 10, dtype=np.float32)
+        ds_micro = lgb.Dataset(X_micro, label=y_micro, free_raw_data=False)
+        try:
+            bst = lgb.train({"device": "cuda", "verbose": -1}, ds_micro, num_boost_round=1)
+            del bst, ds_micro
+            print("[+] LightGBM native CUDA acceleration ENABLED (device='cuda')")
+            _LGBM_DEVICE_CACHE = "cuda"
+            return "cuda"
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    print("[*] LightGBM CUDA Tree Learner not enabled in binary. Safely utilizing high-performance CPU (n_jobs=-1).")
+    _LGBM_DEVICE_CACHE = "cpu"
+    return "cpu"
+
+
+def probe_xgb_device(has_gpu: bool) -> str:
+    """
+    Safely probes whether XGBoost has CUDA device acceleration available.
+    Supports XGBoost 2.0+ (device='cuda') and legacy (tree_method='gpu_hist').
+    """
+    global _XGB_DEVICE_CACHE
+    if _XGB_DEVICE_CACHE is not None:
+        return _XGB_DEVICE_CACHE
+
+    if not has_gpu:
+        _XGB_DEVICE_CACHE = "cpu"
+        return "cpu"
+
+    try:
+        import xgboost as xgb
+        dmat = xgb.DMatrix(np.zeros((10, 2), dtype=np.float32), label=np.array([0, 1] * 5, dtype=np.float32))
+        try:
+            bst = xgb.train({"tree_method": "hist", "device": "cuda"}, dmat, num_boost_round=1)
+            del bst
+            print("[+] XGBoost CUDA acceleration ENABLED (device='cuda')")
+            _XGB_DEVICE_CACHE = "cuda"
+            return "cuda"
+        except Exception:
+            pass
+        try:
+            bst = xgb.train({"tree_method": "gpu_hist"}, dmat, num_boost_round=1)
+            del bst
+            print("[+] XGBoost GPU acceleration ENABLED (tree_method='gpu_hist')")
+            _XGB_DEVICE_CACHE = "gpu_hist"
+            return "gpu_hist"
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    print("[*] XGBoost running on CPU (n_jobs=-1).")
+    _XGB_DEVICE_CACHE = "cpu"
+    return "cpu"
+
+
+def probe_cb_device(has_gpu: bool) -> str:
+    """
+    Safely probes whether CatBoost has GPU acceleration available.
+    """
+    global _CB_DEVICE_CACHE
+    if _CB_DEVICE_CACHE is not None:
+        return _CB_DEVICE_CACHE
+
+    if not has_gpu:
+        _CB_DEVICE_CACHE = "CPU"
+        return "CPU"
+
+    try:
+        from catboost import CatBoostClassifier, Pool
+        p = Pool(np.zeros((10, 2), dtype=np.float32), np.array([0, 1] * 5, dtype=np.float32))
+        cb = CatBoostClassifier(iterations=1, task_type="GPU", verbose=False)
+        cb.fit(p)
+        del cb, p
+        print("[+] CatBoost GPU acceleration ENABLED (task_type='GPU')")
+        _CB_DEVICE_CACHE = "GPU"
+        return "GPU"
+    except Exception as e:
+        print(f"[*] CatBoost GPU unavailable ({e}). Safely running on CPU.")
+
+    _CB_DEVICE_CACHE = "CPU"
+    return "CPU"
+
+
 def locate_data_dir(custom_path: Optional[str] = None) -> Path:
     """Locates the raw or processed dataset directory."""
     candidates = []
@@ -266,8 +373,9 @@ def train_lgbm(
         "verbose": -1,
         "n_jobs": -1,
     }
-    if has_gpu:
-        params["device"] = "cuda"
+    lgb_dev = probe_lgbm_device(has_gpu)
+    if lgb_dev != "cpu":
+        params["device"] = lgb_dev
 
     fold_aucs = []
     for fold_info in folds_data:
@@ -349,11 +457,10 @@ def train_xgboost(
         # Free-Tree high capacity
         lr, depth, min_child, alpha, reg_l, sub, col = 0.030, 7, 6, 0.10, 3.0, 0.85, 0.75
 
+    xgb_dev = probe_xgb_device(has_gpu)
     params = {
         "objective": "binary:logistic",
         "eval_metric": "auc",
-        "tree_method": "hist",
-        "device": "cuda" if has_gpu else "cpu",
         "learning_rate": lr,
         "max_depth": depth,
         "min_child_weight": min_child,
@@ -364,6 +471,14 @@ def train_xgboost(
         "random_state": seed,
         "n_jobs": -1,
     }
+    if xgb_dev == "cuda":
+        params["tree_method"] = "hist"
+        params["device"] = "cuda"
+    elif xgb_dev == "gpu_hist":
+        params["tree_method"] = "gpu_hist"
+    else:
+        params["tree_method"] = "hist"
+        params["device"] = "cpu"
 
     fold_aucs = []
     for fold_info in folds_data:
@@ -440,6 +555,7 @@ def train_catboost(
     else:
         lr, depth, l2_reg = 0.030, 7, 3.0
 
+    cb_dev = probe_cb_device(has_gpu)
     params = {
         "iterations": 2500 if is_boundary_specialist else 3500,
         "learning_rate": lr,
@@ -448,7 +564,7 @@ def train_catboost(
         "eval_metric": "AUC",
         "random_seed": seed,
         "verbose": False,
-        "task_type": "GPU" if has_gpu else "CPU",
+        "task_type": cb_dev,
         "early_stopping_rounds": 100,
     }
 
