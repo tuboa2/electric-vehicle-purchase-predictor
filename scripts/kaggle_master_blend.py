@@ -58,7 +58,6 @@ def run_master_blend():
         "lgbm_grandmaster_orig",
         "xgboost_grandmaster_orig",
         "catboost_grandmaster_orig",
-        "ensemble_grandmaster",
     ]
 
     for root in search_roots:
@@ -70,10 +69,10 @@ def run_master_blend():
             if p.exists() and p.is_dir() and p.resolve() not in seen_dirs:
                 seen_dirs.add(p.resolve())
                 candidate_dirs.append(p)
-        # Then check any other immediate subdirectories
+        # Then check any other immediate subdirectories (skipping meta-ensemble directories)
         try:
             for sub in root.iterdir():
-                if sub.is_dir() and sub.resolve() not in seen_dirs:
+                if sub.is_dir() and sub.resolve() not in seen_dirs and not sub.name.lower().startswith("ensemble"):
                     seen_dirs.add(sub.resolve())
                     candidate_dirs.append(sub)
         except Exception:
@@ -124,6 +123,11 @@ def run_master_blend():
 
             te_arr = df_te[te_col].values.astype(np.float64)
 
+            # Check if predictions are uniform ranks (mean ~ 0.500) rather than calibrated probabilities (~0.175)
+            if np.mean(te_arr) > 0.35:
+                print(f"[!] Skipping {name}: test mean is {np.mean(te_arr):.4f} (uniform ranks, not calibrated probabilities)")
+                continue
+
             # Extract test IDs
             if test_ids is None and "id" in df_te.columns:
                 test_ids = df_te["id"].values
@@ -137,12 +141,12 @@ def run_master_blend():
         except Exception as e:
             print(f"[!] Warning: Could not parse candidate {m_dir.name}: {e}")
 
-    # Load precomputed SOTA blend reference if available
+    # Load precomputed SOTA blend reference if available (prioritizing historical best submissions)
     sota_tracked_candidates = [
+        PROJECT_ROOT / "submission (3).csv",
+        PROJECT_ROOT / "submission (5).csv",
         PROJECT_ROOT / "submission_grandmaster_sota_blend.parquet",
         PROJECT_ROOT / "submission_grandmaster_meta_blend.parquet",
-        PROJECT_ROOT / "submission (3).csv",
-        PROJECT_ROOT / "submission_mega_round_robin.parquet",
     ]
     sota_test_pred = None
     sota_source_name = None
@@ -151,11 +155,14 @@ def run_master_blend():
             try:
                 df_s = pl.read_parquet(s_cand).to_pandas() if s_cand.suffix == ".parquet" else pd.read_csv(s_cand)
                 col = next((c for c in ["Will_Buy_EV", "pred", "probability"] if c in df_s.columns and c != "id"), df_s.columns[-1])
-                sota_test_pred = df_s[col].values.astype(np.float64)
+                pred_vals = df_s[col].values.astype(np.float64)
+                if np.mean(pred_vals) > 0.35:
+                    continue
+                sota_test_pred = pred_vals
                 sota_source_name = s_cand.name
                 if test_ids is None and "id" in df_s.columns:
                     test_ids = df_s["id"].values
-                print(f"[+] Integrated benchmark blend reference: {sota_source_name} (Length: {len(sota_test_pred)})")
+                print(f"[+] Integrated benchmark blend reference: {sota_source_name} (Length: {len(sota_test_pred)}, Mean: {np.mean(sota_test_pred):.4f})")
                 break
             except Exception as e:
                 pass
