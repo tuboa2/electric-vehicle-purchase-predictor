@@ -318,8 +318,22 @@ def build_grandmaster_features(
         + [c for c in test_feat.columns if test_feat[c].nunique() == 1]
     )
 
+    PROTECTED_FEATURES = {
+        "feat_buy_recipe_score",
+        "feat_recipe_dist_to_boundary",
+        "feat_recipe_abs_dist",
+        "feat_recipe_base_margin",
+        "feat_recipe_prob_logit",
+        "feat_recipe_prob_probit",
+        "feat_total_charging",
+        "feat_charging_home_z_city",
+        "feat_charging_work_z_city",
+        "feat_total_charging_z_city",
+        "feat_boundary_gaussian_weight",
+    }
+
     drop_set: Set[str] = set(to_drop_corr).union(set(to_drop_const))
-    drop_cols = [c for c in drop_set if c not in ["id", TARGET]]
+    drop_cols = [c for c in drop_set if c not in ["id", TARGET] and c not in PROTECTED_FEATURES]
 
     if drop_cols:
         train_feat.drop(columns=drop_cols, inplace=True, errors="ignore")

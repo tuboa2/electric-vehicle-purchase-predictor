@@ -64,16 +64,23 @@ def detect_gpu() -> bool:
     return False
 
 
-def locate_data_dir() -> Path:
+def locate_data_dir(custom_path: Optional[str] = None) -> Path:
     """Locates the raw or processed dataset directory."""
-    candidates = [
+    candidates = []
+    if custom_path:
+        candidates.append(Path(custom_path))
+    env_dir = os.environ.get("KAGGLE_DATA_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    candidates.extend([
         Path("/kaggle/input/competitions/playground-series-s6e9"),
         Path("/kaggle/input/playground-series-s6e9"),
         PROJECT_ROOT / "data" / "processed" / "playground-series-s6e9",
         PROJECT_ROOT / "data" / "raw" / "playground-series-s6e9",
-    ]
+    ])
     for p in candidates:
-        if p.exists() and (p / "train.parquet").exists() or (p / "train.csv").exists():
+        if p.exists() and ((p / "train.parquet").exists() or (p / "train.csv").exists()):
             print(f"[+] Dataset located at: {p}")
             return p
     raise FileNotFoundError(f"Could not locate playground-series-s6e9 dataset in candidates: {candidates}")
@@ -297,7 +304,10 @@ def train_lgbm(
         fold_aucs.append(f_auc)
         print(f"  Fold {fold}/{n_splits} AUC: {f_auc:.6f} (Best Iter: {model.best_iteration})")
 
-    overall_auc = roc_auc_score(train_feat_y, oof_preds)
+    y_true = np.zeros(n_samples, dtype=int)
+    for f in folds_data:
+        y_true[f["val_idx"]] = f["y_va"]
+    overall_auc = roc_auc_score(y_true, oof_preds)
     print(f"[+] LightGBM [{tag}] Mean Fold AUC: {np.mean(fold_aucs):.6f} | Overall OOF AUC: {overall_auc:.6f}")
     return overall_auc, oof_preds, test_preds
 
@@ -378,7 +388,10 @@ def train_xgboost(
         fold_aucs.append(f_auc)
         print(f"  Fold {fold}/{n_splits} AUC: {f_auc:.6f} (Best Iter: {model.best_iteration})")
 
-    overall_auc = roc_auc_score(train_feat_y, oof_preds)
+    y_true = np.zeros(n_samples, dtype=int)
+    for f in folds_data:
+        y_true[f["val_idx"]] = f["y_va"]
+    overall_auc = roc_auc_score(y_true, oof_preds)
     print(f"[+] XGBoost [{tag}] Mean Fold AUC: {np.mean(fold_aucs):.6f} | Overall OOF AUC: {overall_auc:.6f}")
     return overall_auc, oof_preds, test_preds
 
@@ -446,7 +459,10 @@ def train_catboost(
         fold_aucs.append(f_auc)
         print(f"  Fold {fold}/{n_splits} AUC: {f_auc:.6f} (Best Iter: {cb.get_best_iteration()})")
 
-    overall_auc = roc_auc_score(train_feat_y, oof_preds)
+    y_true = np.zeros(n_samples, dtype=int)
+    for f in folds_data:
+        y_true[f["val_idx"]] = f["y_va"]
+    overall_auc = roc_auc_score(y_true, oof_preds)
     print(f"[+] CatBoost [{tag}] Mean Fold AUC: {np.mean(fold_aucs):.6f} | Overall OOF AUC: {overall_auc:.6f}")
     return overall_auc, oof_preds, test_preds
 
@@ -568,11 +584,39 @@ def make_zero_tie_ranks(primary_scores: np.ndarray, secondary_scores: Optional[n
     return ranks
 
 
+def extract_recipe_diff(df: pd.DataFrame) -> np.ndarray:
+    """Extracts or computes (Buy_Score - 5.61235) with guaranteed fallback."""
+    if "feat_recipe_dist_to_boundary" in df.columns:
+        return df["feat_recipe_dist_to_boundary"].values
+    if "feat_buy_recipe_score" in df.columns:
+        return df["feat_buy_recipe_score"].values - 5.61235
+    inc = df["Annual_Income_USD"].astype(float).values
+    env = df["Environmental_Concern_Level"].astype(float).values if "Environmental_Concern_Level" in df.columns else 3.0
+    sub = (df["Subsidy_Available"].astype(str) == "Yes").astype(float).values if "Subsidy_Available" in df.columns else 0.0
+    anx = df["Range_Anxiety_Level"].astype(str).values if "Range_Anxiety_Level" in df.columns else "Low"
+    score = (
+        1.2 * (inc / 100000.0)
+        + 0.6 * env
+        + 2.0 * sub
+        - 1.0 * (anx == "Medium").astype(float)
+        - 3.0 * (anx == "High").astype(float)
+    )
+    return score - 5.61235
+
+
+def extract_recipe_score(df: pd.DataFrame) -> np.ndarray:
+    """Extracts or computes the raw linear Buy_Score for zero-tie ranking."""
+    if "feat_buy_recipe_score" in df.columns:
+        return df["feat_buy_recipe_score"].values
+    return extract_recipe_diff(df) + 5.61235
+
+
 def main():
     parser = argparse.ArgumentParser(description="KAMAS Top-1 Execution Engine")
     parser.add_argument("--n-splits", type=int, default=10, help="Number of Stratified K-Fold splits")
     parser.add_argument("--seeds", type=int, nargs="+", default=[42], help="Random seeds to train")
     parser.add_argument("--models", type=str, nargs="+", default=["lgbm", "xgboost", "catboost"], help="Base models")
+    parser.add_argument("--data-dir", type=str, default=None, help="Custom dataset directory")
     parser.add_argument("--output-dir", type=str, default="/kaggle/working/models_top1", help="Output directory")
     args = parser.parse_args()
 
@@ -582,7 +626,7 @@ def main():
     has_gpu = detect_gpu()
 
     # 1. Ingestion
-    data_dir = locate_data_dir()
+    data_dir = locate_data_dir(args.data_dir)
     train_raw, test_raw, orig_raw = load_dataset(data_dir)
     test_ids = test_raw["id"]
 
@@ -594,9 +638,9 @@ def main():
     global train_feat_y
     train_feat_y = train_feat[TARGET].values
 
-    recipe_diff_tr = train_feat["feat_recipe_dist_to_boundary"].values
-    recipe_diff_te = test_feat["feat_recipe_dist_to_boundary"].values
-    sec_score_te = test_feat["feat_buy_recipe_score"].values if "feat_buy_recipe_score" in test_feat.columns else None
+    recipe_diff_tr = extract_recipe_diff(train_feat)
+    recipe_diff_te = extract_recipe_diff(test_feat)
+    sec_score_te = extract_recipe_score(test_feat)
 
     # Accumulators across seeds
     all_stream_a_oof = np.zeros(len(train_feat), dtype=np.float32)
