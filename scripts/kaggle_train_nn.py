@@ -283,7 +283,9 @@ def train_nn_model(
     oof_out = model_dir / "oof_preds.parquet"
     pl.DataFrame({
         id_col: train_df[id_col],
+        "oof_pred": oof_preds,
         "pred": oof_preds,
+        "target": y_train,
         target_col: train_df[target_col],
         "fold": train_df["fold"],
     }).write_parquet(oof_out, compression="zstd")
@@ -292,6 +294,7 @@ def train_nn_model(
     pl.DataFrame({
         id_col: test_df[id_col],
         "pred": test_preds,
+        target_col: test_preds,
     }).write_parquet(test_out, compression="zstd")
 
     metrics_summary = {
