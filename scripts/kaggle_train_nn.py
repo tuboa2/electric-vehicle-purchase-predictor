@@ -19,6 +19,8 @@ Key Architectural Innovations:
    - Optimized for Kaggle Tesla T4 GPU (Batch Size: 4096, pin_memory, fast CUDA execution in < 10 mins).
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -46,6 +48,35 @@ try:
     HAS_TORCH = True
 except ImportError:
     HAS_TORCH = False
+    class Dataset:  # type: ignore
+        pass
+    class _MockTorch:  # type: ignore
+        class Tensor:
+            pass
+        class device:
+            pass
+    torch = _MockTorch()  # type: ignore
+    class _MockNN:  # type: ignore
+        class Module:
+            pass
+        class ModuleList(list):
+            pass
+        class Identity:
+            pass
+        class Sequential:
+            def __init__(self, *args): pass
+        class BatchNorm1d:
+            def __init__(self, *args, **kwargs): pass
+        class Linear:
+            def __init__(self, *args, **kwargs): pass
+        class GELU:
+            def __init__(self, *args, **kwargs): pass
+        class Dropout:
+            def __init__(self, *args, **kwargs): pass
+        class Embedding:
+            def __init__(self, *args, **kwargs): pass
+        def Parameter(self, *args, **kwargs): return None
+    nn = _MockNN()
 
 from features.grandmaster_features import build_grandmaster_features, TARGET
 from kaggle.paths import resolve_data_dir, resolve_output_dir
