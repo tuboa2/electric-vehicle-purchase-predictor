@@ -19,11 +19,13 @@ Synthesizes the unanimous consensus of 11 frontier LLM deep research reports:
 """
 
 import argparse
+import concurrent.futures
 import gc
 import json
 import os
 from pathlib import Path
 import sys
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -43,23 +45,35 @@ if str(PROJECT_ROOT) not in sys.path:
 from features.grandmaster_features import build_grandmaster_features, TARGET
 
 
-def detect_gpu() -> bool:
-    """Detects if CUDA GPU is available."""
+def get_gpu_count() -> int:
+    """Returns number of available CUDA GPUs."""
     try:
         import torch
         if torch.cuda.is_available():
-            device_name = torch.cuda.get_device_name(0)
-            print(f"[+] GPU detected via PyTorch: {device_name}")
-            return True
-    except ImportError:
-        pass
-    try:
-        res = os.popen("nvidia-smi").read()
-        if "NVIDIA" in res:
-            print("[+] NVIDIA GPU detected via nvidia-smi")
-            return True
+            return torch.cuda.device_count()
     except Exception:
         pass
+    try:
+        res = os.popen("nvidia-smi -L").read()
+        lines = [l for l in res.strip().split("\n") if "GPU " in l]
+        if lines:
+            return len(lines)
+    except Exception:
+        pass
+    return 0
+
+
+def detect_gpu() -> bool:
+    """Detects if CUDA GPU is available and logs device details."""
+    count = get_gpu_count()
+    if count > 0:
+        try:
+            import torch
+            names = [torch.cuda.get_device_name(i) for i in range(count)]
+            print(f"[+] {count} GPU(s) detected via PyTorch: {', '.join(names)}")
+        except Exception:
+            print(f"[+] {count} GPU(s) detected via nvidia-smi")
+        return True
     print("[-] No GPU detected. Running on high-performance multi-threaded CPU.")
     return False
 
@@ -335,6 +349,7 @@ def train_lgbm(
     has_gpu: bool,
     use_base_margin: bool = False,
     is_boundary_specialist: bool = False,
+    n_jobs: Optional[int] = None,
 ) -> Tuple[float, np.ndarray, np.ndarray]:
     """Trains a LightGBM model across all folds."""
     import lightgbm as lgb
@@ -348,13 +363,15 @@ def train_lgbm(
     print(f"\n--- Training LightGBM [{tag}] (Seed: {seed}) ---")
 
     if is_boundary_specialist:
-        lr, leaves, depth, alpha, reg_l, min_child = 0.020, 63, 5, 0.30, 8.0, 50
+        lr, leaves, depth, alpha, reg_l, min_child = 0.025, 63, 5, 0.30, 8.0, 50
     elif use_base_margin:
         # Constrained shallow trees force fitting strictly the residual error without re-learning the recipe
-        lr, leaves, depth, alpha, reg_l, min_child = 0.020, 31, 5, 0.20, 6.0, 100
+        lr, leaves, depth, alpha, reg_l, min_child = 0.025, 31, 5, 0.20, 6.0, 100
     else:
         # Free-Tree high capacity exploratory splits
-        lr, leaves, depth, alpha, reg_l, min_child = 0.030, 127, 8, 0.10, 0.5, 40
+        lr, leaves, depth, alpha, reg_l, min_child = 0.035, 127, 8, 0.10, 0.5, 40
+
+    cpu_cores = max(1, (os.cpu_count() or 4) - 1) if n_jobs is None else n_jobs
 
     params = {
         "objective": "binary",
@@ -371,7 +388,7 @@ def train_lgbm(
         "reg_lambda": reg_l,
         "random_state": seed,
         "verbose": -1,
-        "n_jobs": -1,
+        "n_jobs": cpu_cores,
     }
     lgb_dev = probe_lgbm_device(has_gpu)
     if lgb_dev != "cpu":
@@ -395,8 +412,8 @@ def train_lgbm(
         trn_data = lgb.Dataset(X_tr, label=y_tr, weight=sw, init_score=init_tr, free_raw_data=False)
         val_data = lgb.Dataset(X_va, label=y_va, init_score=init_va, reference=trn_data, free_raw_data=False)
 
-        callbacks = [lgb.early_stopping(stopping_rounds=100, verbose=False)]
-        num_rounds = 2500 if is_boundary_specialist else 3500
+        callbacks = [lgb.early_stopping(stopping_rounds=80, verbose=False)]
+        num_rounds = 2000 if is_boundary_specialist else (2500 if use_base_margin else 3000)
 
         model = lgb.train(
             params,
@@ -420,6 +437,8 @@ def train_lgbm(
         f_auc = roc_auc_score(y_va, val_p)
         fold_aucs.append(f_auc)
         print(f"  Fold {fold}/{n_splits} AUC: {f_auc:.6f} (Best Iter: {model.best_iteration})")
+        del trn_data, val_data, model
+        gc.collect()
 
     y_true = np.zeros(n_samples, dtype=int)
     for f in folds_data:
@@ -427,6 +446,60 @@ def train_lgbm(
     overall_auc = roc_auc_score(y_true, oof_preds)
     print(f"[+] LightGBM [{tag}] Mean Fold AUC: {np.mean(fold_aucs):.6f} | Overall OOF AUC: {overall_auc:.6f}")
     return overall_auc, oof_preds, test_preds
+
+
+def _train_single_xgb_fold(
+    fold_info: Dict[str, Any],
+    base_params: Dict[str, Any],
+    device_str: Optional[str],
+    use_base_margin: bool,
+    is_boundary_specialist: bool,
+) -> Tuple[int, np.ndarray, np.ndarray, np.ndarray, float, int]:
+    """Trains a single XGBoost fold with explicit device targeting."""
+    import xgboost as xgb
+
+    fold = fold_info["fold"]
+    X_tr = fold_info["X_tr"]
+    y_tr = fold_info["y_tr"]
+    X_va = fold_info["X_va"]
+    y_va = fold_info["y_va"]
+    X_te = fold_info["X_te"]
+    val_idx = fold_info["val_idx"]
+
+    sw = fold_info["sw_boundary_tr"] if is_boundary_specialist else None
+    m_tr = fold_info["margin_tr"] if use_base_margin else None
+    m_va = fold_info["margin_va"] if use_base_margin else None
+    m_te = fold_info["margin_te"] if use_base_margin else None
+
+    # Deep copy params for thread safety
+    p = dict(base_params)
+    if device_str is not None:
+        p["device"] = device_str
+
+    dtrain = xgb.DMatrix(X_tr, label=y_tr, weight=sw, base_margin=m_tr)
+    dval = xgb.DMatrix(X_va, label=y_va, base_margin=m_va)
+    dtest = xgb.DMatrix(X_te, base_margin=m_te)
+
+    num_rounds = 2000 if is_boundary_specialist else (2500 if use_base_margin else 3000)
+    evallist = [(dval, "eval")]
+
+    model = xgb.train(
+        p,
+        dtrain,
+        num_boost_round=num_rounds,
+        evals=evallist,
+        early_stopping_rounds=80,
+        verbose_eval=False,
+    )
+
+    val_p = model.predict(dval).astype(np.float32)
+    te_p = model.predict(dtest).astype(np.float32)
+    best_it = model.best_iteration
+    del dtrain, dval, dtest, model
+    gc.collect()
+
+    f_auc = roc_auc_score(y_va, val_p)
+    return fold, val_idx, val_p, te_p, f_auc, best_it
 
 
 def train_xgboost(
@@ -437,9 +510,7 @@ def train_xgboost(
     use_base_margin: bool = False,
     is_boundary_specialist: bool = False,
 ) -> Tuple[float, np.ndarray, np.ndarray]:
-    """Trains an XGBoost model across all folds."""
-    import xgboost as xgb
-
+    """Trains an XGBoost model across all folds with dual-GPU distribution."""
     n_samples = sum(len(f["val_idx"]) for f in folds_data)
     n_test = len(folds_data[0]["X_te"])
     oof_preds = np.zeros(n_samples, dtype=np.float32)
@@ -449,15 +520,17 @@ def train_xgboost(
     print(f"\n--- Training XGBoost [{tag}] (Seed: {seed}) ---")
 
     if is_boundary_specialist:
-        lr, depth, min_child, alpha, reg_l, sub, col = 0.015, 4, 20, 0.30, 15.0, 0.90, 0.65
+        lr, depth, min_child, alpha, reg_l, sub, col = 0.020, 4, 20, 0.30, 15.0, 0.90, 0.65
     elif use_base_margin:
         # Constrained shallow trees force residual learning
-        lr, depth, min_child, alpha, reg_l, sub, col = 0.020, 5, 20, 0.20, 8.0, 0.85, 0.75
+        lr, depth, min_child, alpha, reg_l, sub, col = 0.025, 5, 20, 0.20, 8.0, 0.85, 0.75
     else:
         # Free-Tree high capacity
-        lr, depth, min_child, alpha, reg_l, sub, col = 0.030, 7, 6, 0.10, 3.0, 0.85, 0.75
+        lr, depth, min_child, alpha, reg_l, sub, col = 0.035, 7, 6, 0.10, 3.0, 0.85, 0.75
 
     xgb_dev = probe_xgb_device(has_gpu)
+    num_gpus = get_gpu_count() if has_gpu else 0
+
     params = {
         "objective": "binary:logistic",
         "eval_metric": "auc",
@@ -469,11 +542,11 @@ def train_xgboost(
         "reg_alpha": alpha,
         "reg_lambda": reg_l,
         "random_state": seed,
-        "n_jobs": -1,
+        "n_jobs": 1 if (num_gpus >= 2 and xgb_dev == "cuda") else -1,
     }
     if xgb_dev == "cuda":
         params["tree_method"] = "hist"
-        params["device"] = "cuda"
+        params["device"] = "cuda:0"
     elif xgb_dev == "gpu_hist":
         params["tree_method"] = "gpu_hist"
     else:
@@ -481,45 +554,53 @@ def train_xgboost(
         params["device"] = "cpu"
 
     fold_aucs = []
-    for fold_info in folds_data:
-        fold = fold_info["fold"]
-        X_tr = fold_info["X_tr"]
-        y_tr = fold_info["y_tr"]
-        X_va = fold_info["X_va"]
-        y_va = fold_info["y_va"]
-        X_te = fold_info["X_te"]
-        val_idx = fold_info["val_idx"]
 
-        sw = fold_info["sw_boundary_tr"] if is_boundary_specialist else None
-        m_tr = fold_info["margin_tr"] if use_base_margin else None
-        m_va = fold_info["margin_va"] if use_base_margin else None
-        m_te = fold_info["margin_te"] if use_base_margin else None
-
-        dtrain = xgb.DMatrix(X_tr, label=y_tr, weight=sw, base_margin=m_tr)
-        dval = xgb.DMatrix(X_va, label=y_va, base_margin=m_va)
-        dtest = xgb.DMatrix(X_te, base_margin=m_te)
-
-        num_rounds = 2500 if is_boundary_specialist else 3500
-        evallist = [(dval, "eval")]
-
-        model = xgb.train(
-            params,
-            dtrain,
-            num_boost_round=num_rounds,
-            evals=evallist,
-            early_stopping_rounds=100,
-            verbose_eval=False,
-        )
-
-        val_p = model.predict(dval)
-        te_p = model.predict(dtest)
-
-        oof_preds[val_idx] = val_p.astype(np.float32)
-        test_preds += (te_p / n_splits).astype(np.float32)
-
-        f_auc = roc_auc_score(y_va, val_p)
-        fold_aucs.append(f_auc)
-        print(f"  Fold {fold}/{n_splits} AUC: {f_auc:.6f} (Best Iter: {model.best_iteration})")
+    # If 2+ GPUs detected, parallelize fold execution across cuda:0 and cuda:1
+    if num_gpus >= 2 and xgb_dev == "cuda":
+        print(f"[+] Dual GPUs active: Distributing XGBoost folds across cuda:0 and cuda:1 in parallel...")
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(
+                        _train_single_xgb_fold,
+                        fold_info,
+                        params,
+                        f"cuda:{idx % 2}",
+                        use_base_margin,
+                        is_boundary_specialist,
+                    )
+                    for idx, fold_info in enumerate(folds_data)
+                ]
+                for fut in concurrent.futures.as_completed(futures):
+                    fold, val_idx, val_p, te_p, f_auc, best_it = fut.result()
+                    oof_preds[val_idx] = val_p
+                    test_preds += (te_p / n_splits)
+                    fold_aucs.append(f_auc)
+                    dev_name = f"cuda:{(fold - 1) % 2}"
+                    print(f"  Fold {fold}/{n_splits} AUC: {f_auc:.6f} (Best Iter: {best_it}) [{dev_name}]")
+        except Exception as e:
+            print(f"[!] Note: Parallel multi-GPU encountered: {e}. Executing sequentially on cuda:0.")
+            oof_preds.fill(0)
+            test_preds.fill(0)
+            fold_aucs.clear()
+            for fold_info in folds_data:
+                fold, val_idx, val_p, te_p, f_auc, best_it = _train_single_xgb_fold(
+                    fold_info, params, "cuda:0", use_base_margin, is_boundary_specialist
+                )
+                oof_preds[val_idx] = val_p
+                test_preds += (te_p / n_splits)
+                fold_aucs.append(f_auc)
+                print(f"  Fold {fold}/{n_splits} AUC: {f_auc:.6f} (Best Iter: {best_it})")
+    else:
+        dev_str = "cuda:0" if xgb_dev == "cuda" else None
+        for fold_info in folds_data:
+            fold, val_idx, val_p, te_p, f_auc, best_it = _train_single_xgb_fold(
+                fold_info, params, dev_str, use_base_margin, is_boundary_specialist
+            )
+            oof_preds[val_idx] = val_p
+            test_preds += (te_p / n_splits)
+            fold_aucs.append(f_auc)
+            print(f"  Fold {fold}/{n_splits} AUC: {f_auc:.6f} (Best Iter: {best_it})")
 
     y_true = np.zeros(n_samples, dtype=int)
     for f in folds_data:
@@ -537,7 +618,7 @@ def train_catboost(
     use_base_margin: bool = False,
     is_boundary_specialist: bool = False,
 ) -> Tuple[float, np.ndarray, np.ndarray]:
-    """Trains a CatBoost model across all folds."""
+    """Trains a CatBoost model across all folds with multi-GPU and CPU acceleration."""
     from catboost import CatBoostClassifier, Pool
 
     n_samples = sum(len(f["val_idx"]) for f in folds_data)
@@ -549,15 +630,21 @@ def train_catboost(
     print(f"\n--- Training CatBoost [{tag}] (Seed: {seed}) ---")
 
     if is_boundary_specialist:
-        lr, depth, l2_reg = 0.020, 5, 10.0
+        lr, depth, l2_reg = 0.025, 5, 10.0
+        n_iters = 2000
     elif use_base_margin:
-        lr, depth, l2_reg = 0.020, 5, 8.0
+        lr, depth, l2_reg = 0.025, 5, 8.0
+        n_iters = 2000
     else:
-        lr, depth, l2_reg = 0.030, 7, 3.0
+        # Free-Tree: depth 6 symmetric tree = 64 leaves; 2x faster than depth 7 with superior regularization
+        lr, depth, l2_reg = 0.035, 6, 4.0
+        n_iters = 2500
 
     cb_dev = probe_cb_device(has_gpu)
+    num_gpus = get_gpu_count() if has_gpu else 0
+
     params = {
-        "iterations": 2500 if is_boundary_specialist else 3500,
+        "iterations": n_iters,
         "learning_rate": lr,
         "depth": depth,
         "l2_leaf_reg": l2_reg,
@@ -565,8 +652,16 @@ def train_catboost(
         "random_seed": seed,
         "verbose": False,
         "task_type": cb_dev,
-        "early_stopping_rounds": 100,
+        "early_stopping_rounds": 80,
+        "thread_count": -1,
     }
+    if cb_dev == "GPU":
+        params["border_count"] = 128
+        if num_gpus >= 2:
+            params["devices"] = "0:1"
+            print("[+] CatBoost multi-GPU enabled across Dual Tesla T4s (devices='0:1')")
+        else:
+            params["devices"] = "0"
 
     fold_aucs = []
     for fold_info in folds_data:
@@ -599,6 +694,8 @@ def train_catboost(
         f_auc = roc_auc_score(y_va, val_p)
         fold_aucs.append(f_auc)
         print(f"  Fold {fold}/{n_splits} AUC: {f_auc:.6f} (Best Iter: {cb.get_best_iteration()})")
+        del pool_tr, pool_va, pool_te, cb
+        gc.collect()
 
     y_true = np.zeros(n_samples, dtype=int)
     for f in folds_data:
@@ -840,15 +937,33 @@ def main():
         seed_a_test = np.zeros(len(test_feat), dtype=np.float32)
         n_a = len(args.models)
 
-        for m in args.models:
-            if m == "lgbm":
-                _, oof_m, te_m = train_lgbm(folds_data, args.n_splits, seed, has_gpu, use_base_margin=False)
-            elif m == "xgboost":
-                _, oof_m, te_m = train_xgboost(folds_data, args.n_splits, seed, has_gpu, use_base_margin=False)
-            elif m == "catboost":
-                _, oof_m, te_m = train_catboost(folds_data, args.n_splits, seed, has_gpu, use_base_margin=False)
-            seed_a_oof += oof_m / n_a
-            seed_a_test += te_m / n_a
+        # Execute LightGBM (CPU) and XGBoost (Dual GPU) concurrently to maximize hardware saturation
+        if "lgbm" in args.models and "xgboost" in args.models and has_gpu:
+            print("\n[+] CONCURRENT PIPELINE: Launching LightGBM on CPU (3 vCPUs) and XGBoost on Dual Tesla T4s simultaneously!")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pe:
+                fut_lgb = pe.submit(train_lgbm, folds_data, args.n_splits, seed, has_gpu, False, False)
+                fut_xgb = pe.submit(train_xgboost, folds_data, args.n_splits, seed, has_gpu, False, False)
+
+                _, oof_lgb, te_lgb = fut_lgb.result()
+                _, oof_xgb, te_xgb = fut_xgb.result()
+
+            seed_a_oof += (oof_lgb / n_a) + (oof_xgb / n_a)
+            seed_a_test += (te_lgb / n_a) + (te_xgb / n_a)
+
+            if "catboost" in args.models:
+                _, oof_cb, te_cb = train_catboost(folds_data, args.n_splits, seed, has_gpu, use_base_margin=False)
+                seed_a_oof += oof_cb / n_a
+                seed_a_test += te_cb / n_a
+        else:
+            for m in args.models:
+                if m == "lgbm":
+                    _, oof_m, te_m = train_lgbm(folds_data, args.n_splits, seed, has_gpu, use_base_margin=False)
+                elif m == "xgboost":
+                    _, oof_m, te_m = train_xgboost(folds_data, args.n_splits, seed, has_gpu, use_base_margin=False)
+                elif m == "catboost":
+                    _, oof_m, te_m = train_catboost(folds_data, args.n_splits, seed, has_gpu, use_base_margin=False)
+                seed_a_oof += oof_m / n_a
+                seed_a_test += te_m / n_a
 
         all_stream_a_oof += seed_a_oof / total_seeds
         all_stream_a_test += seed_a_test / total_seeds
@@ -860,15 +975,32 @@ def main():
         seed_b_test = np.zeros(len(test_feat), dtype=np.float32)
         n_b = len(args.models)
 
-        for m in args.models:
-            if m == "lgbm":
-                _, oof_m, te_m = train_lgbm(folds_data, args.n_splits, seed, has_gpu, use_base_margin=True)
-            elif m == "xgboost":
-                _, oof_m, te_m = train_xgboost(folds_data, args.n_splits, seed, has_gpu, use_base_margin=True)
-            elif m == "catboost":
-                _, oof_m, te_m = train_catboost(folds_data, args.n_splits, seed, has_gpu, use_base_margin=True)
-            seed_b_oof += oof_m / n_b
-            seed_b_test += te_m / n_b
+        if "lgbm" in args.models and "xgboost" in args.models and has_gpu:
+            print("\n[+] CONCURRENT PIPELINE: Launching Base-Margin LightGBM (CPU) and XGBoost (Dual GPU) simultaneously!")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pe:
+                fut_lgb = pe.submit(train_lgbm, folds_data, args.n_splits, seed, has_gpu, True, False)
+                fut_xgb = pe.submit(train_xgboost, folds_data, args.n_splits, seed, has_gpu, True, False)
+
+                _, oof_lgb, te_lgb = fut_lgb.result()
+                _, oof_xgb, te_xgb = fut_xgb.result()
+
+            seed_b_oof += (oof_lgb / n_b) + (oof_xgb / n_b)
+            seed_b_test += (te_lgb / n_b) + (te_xgb / n_b)
+
+            if "catboost" in args.models:
+                _, oof_cb, te_cb = train_catboost(folds_data, args.n_splits, seed, has_gpu, use_base_margin=True)
+                seed_b_oof += oof_cb / n_b
+                seed_b_test += te_cb / n_b
+        else:
+            for m in args.models:
+                if m == "lgbm":
+                    _, oof_m, te_m = train_lgbm(folds_data, args.n_splits, seed, has_gpu, use_base_margin=True)
+                elif m == "xgboost":
+                    _, oof_m, te_m = train_xgboost(folds_data, args.n_splits, seed, has_gpu, use_base_margin=True)
+                elif m == "catboost":
+                    _, oof_m, te_m = train_catboost(folds_data, args.n_splits, seed, has_gpu, use_base_margin=True)
+                seed_b_oof += oof_m / n_b
+                seed_b_test += te_m / n_b
 
         all_stream_b_oof += seed_b_oof / total_seeds
         all_stream_b_test += seed_b_test / total_seeds
