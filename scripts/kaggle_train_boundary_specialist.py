@@ -61,6 +61,13 @@ def main():
     X_train_full, X_test_full, features, cat_cols = build_grandmaster_features(
         train, test, orig
     )
+    
+    # DROP TARGET FROM FEATURES!
+    if TARGET in X_train_full.columns:
+        X_train_full = X_train_full.drop(columns=[TARGET])
+    if TARGET in X_test_full.columns:
+        X_test_full = X_test_full.drop(columns=[TARGET])
+
     y_train_full = (
         train[TARGET].map({"Yes": 1, "No": 0, "1": 1, "0": 0}).astype(int).values
     )
