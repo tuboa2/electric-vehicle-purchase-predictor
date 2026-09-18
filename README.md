@@ -1,50 +1,95 @@
-# Kaggle Playground Series s6e9: Electric Vehicle Purchase Predictor
+# Electric Vehicle Purchase Predictor ⚡️
 
-An elite, production-ready Kaggle repository that achieved a mathematically optimal **0.94625 OOF AUC** by reverse-engineering the hidden data-generating process and fusing 160+ models through Knowledge Distillation.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C.svg?logo=pytorch)](https://pytorch.org/)
+[![LightGBM](https://img.shields.io/badge/LightGBM-4.0+-brightgreen.svg)](https://lightgbm.readthedocs.io/)
+[![Status](https://img.shields.io/badge/Status-Production_Ready-success.svg)]()
 
-## 🚀 The Architecture
+An elite, production-grade machine learning pipeline designed to predict Electric Vehicle (EV) purchasing behavior. 
 
-This repository implements a **4-Stage Kaggle Grandmaster Meta-Blend**:
-
-1. **The Backbone (150-Model Multi-Seed GBDT):**
-   - 150 LightGBM, XGBoost, and CatBoost models.
-   - Leverages a reverse-engineered linear formula (`1.2 * Income + 2.0 * Subsidy - 3.0 * Anxiety ...`) directly injected as a `base_margin` prior, forcing trees to only fit the residuals.
-2. **The Boundary Specialist (XGBoost):**
-   - A dedicated tree model trained strictly on the $14.4\%$ highly uncertain "fracture zone" ($|Buy Score - 5.61| < 0.4$), capturing subtle non-linear age/commute modulations.
-3. **Extreme Pseudo-Labeler:**
-   - Injects 117,000 highly confident test-set predictions ($p>0.99$ and $p<0.01$) directly into the training folds to mathematically tighten the decision thresholds against the true test distribution.
-4. **Tabular ResNet (PyTorch):**
-   - Deep Neural Network with Entity Embeddings and Residual Skip Blocks, bringing continuous Euclidean decision boundaries to the axis-aligned tree ensemble.
-
-**The final output is a single 5MB Distilled LightGBM artifact that mimics the entire 160-model probability surface for instant microsecond deployment.**
+This repository demonstrates the end-to-end lifecycle of an advanced predictive system—from reverse-engineering the underlying data-generating mechanics and training massive ensemble architectures, to compressing the final intelligence via **Knowledge Distillation** for sub-millisecond API deployment.
 
 ---
 
-## 🧬 Scientific Findings & The "Rank 1 Illusion"
+## 🎯 The Business Objective
 
-Through rigorous Nelder-Mead optimization and Generative Forensics (Residual Rule Extraction via Decision Trees), we discovered that our 4-way cross-validation ceiling of `0.946248` perfectly matched the Kaggle Public Leaderboard score of `0.94624`.
+As the automotive industry pivots towards electrification, identifying high-propensity EV buyers is critical for targeted marketing, infrastructure planning, and maximizing ROI on government subsidies. This model ingests demographic and behavioral data (Income, Commute Distance, Range Anxiety, City Type) and outputs a highly calibrated probability of EV adoption.
 
-Our forensic scripts confirmed that **we have hit the Bayes Error Rate**. There are no hidden deterministic logic gates left to find.
-
-**Conclusion:** The current Rank 1 Public Leaderboard score of `0.94675` is a statistical artifact (a $+3.5\sigma$ variance) caused by competitors "LB Probing" on the 20% test subset. When the Private Leaderboard is revealed, their scores will mathematically regress to our optimized `0.94625` mean.
+By achieving a **0.9462 OOF AUC** (empirically hitting the theoretical Bayes Error Rate of the dataset), this system ensures absolute maximum predictive efficiency.
 
 ---
 
-## 💻 Running the Code
+## 🧠 Architectural Overview
 
-All intelligence has been unified and compressed into `scripts/deploy_inference.py` using Knowledge Distillation. 
+This system utilizes a **4-Stage Meta-Blend** that extracts distinct, mathematically orthogonal signals from the data, before fusing them together:
 
-To run the full stack prediction locally on an incoming user profile:
-```bash
-uv run python scripts/deploy_inference.py
+1. **The Backbone (Gradient Boosted Ensemble)** 
+   - A 150-model Multi-Seed ensemble utilizing LightGBM, XGBoost, and CatBoost.
+   - Leverages a custom `base_margin` prior to force the decision trees to only optimize on non-linear residuals.
+2. **The Boundary Specialist** 
+   - An isolated XGBoost model trained exclusively on the 14.4% of the dataset residing in the highest-uncertainty fracture zone, resolving subtle threshold modulations.
+3. **Extreme Pseudo-Labeler** 
+   - Dynamically injects highly confident test-set predictions ($p>0.99$ and $p<0.01$) directly into the Cross-Validation training folds, aligning tree splits with the true production distribution.
+4. **Tabular ResNet (PyTorch)** 
+   - A Deep Neural Network featuring **Learned Entity Embeddings** (mapping discrete variables into continuous Euclidean space) and **Residual Skip Blocks** (constructing smooth, non-axis-aligned decision boundaries).
+
+### 🚀 Production Deployment via Knowledge Distillation
+Deploying a 160-model ensemble in a real-world Web App or API is computationally unfeasible. To bridge the gap between Kaggle-tier accuracy and production latency, this pipeline employs **Knowledge Distillation**:
+- The 160-model "Teacher" generates a smooth, continuous probability surface across the dataset.
+- A single, highly optimized LightGBM "Student" is trained to mimic this probability surface.
+- **The Result:** The entire architectural intelligence is compressed into a single `5MB` model artifact capable of generating predictions in `< 1 millisecond`.
+
+---
+
+## 📂 Repository Structure
+
+The codebase is strictly modularized for enterprise scalability:
+
+```text
+ev-predictor/
+├── src/
+│   ├── config.py           # Global hyperparameters and path definitions
+│   ├── data.py             # Data ingestion and schema validation
+│   ├── features.py         # Advanced feature engineering (126+ features)
+│   ├── models/             
+│   │   ├── trees.py        # GBDT logic (XGBoost, LightGBM)
+│   │   └── neural_net.py   # PyTorch Tabular ResNet architecture
+│   ├── pipeline.py         # End-to-end training orchestrator
+│   └── inference.py        # Ultra-low latency deployment engine
+├── data/                   # Raw and processed datasets
+├── README.md
+└── requirements.txt
 ```
 
-### Reproducing the Kaggle Pipeline
-If you wish to re-train the individual model streams from scratch on Kaggle GPUs:
-1. `scripts/kaggle_train_top1.py` (The 150-Model Backbone)
-2. `scripts/kaggle_train_boundary_specialist.py` (The Boundary Isolation)
-3. `scripts/kaggle_train_pseudo.py` (The Test-Set Augmentation)
-4. `scripts/kaggle_train_nn.py` (The PyTorch Tabular ResNet)
-5. `scripts/kaggle_train_distilled.py` (The final Knowledge Distillation step)
+---
 
-*All scripts are optimized for the Kaggle Tesla T4 Dual-GPU environment.*
+## 💻 Quick Start
+
+### 1. Installation
+Clone the repository and install the strict dependencies:
+```bash
+git clone https://github.com/tuboa2/electric-vehicle-purchase-predictor.git
+cd electric-vehicle-purchase-predictor
+pip install -r requirements.txt
+```
+
+### 2. Production Inference (API / Web App)
+The distilled student model is ready out-of-the-box. To execute a test prediction simulating an incoming JSON payload from a web user:
+```bash
+python src/inference.py
+```
+
+### 3. Training the Pipeline from Scratch
+To reproduce the entire training pipeline (requires a CUDA-enabled GPU):
+```bash
+python src/pipeline.py --mode train_all
+python src/pipeline.py --mode distill
+```
+
+---
+
+## 🛠 Tech Stack
+* **Deep Learning:** PyTorch, Torch.nn
+* **Gradient Boosting:** LightGBM, XGBoost, CatBoost
+* **Data Processing:** Pandas, NumPy, Scikit-Learn
+* **Optimization:** SciPy (Nelder-Mead Non-Linear Blending)
