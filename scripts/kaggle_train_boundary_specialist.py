@@ -191,3 +191,6 @@ def main():
 
     print(f"[*] Artifacts saved to {out_dir}/")
 
+
+if __name__ == "__main__":
+    main()
