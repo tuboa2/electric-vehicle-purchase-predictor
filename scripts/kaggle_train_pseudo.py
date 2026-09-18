@@ -86,7 +86,8 @@ def main():
     y_train_full = train[TARGET].map({"Yes": 1, "No": 0, "1": 1, "0": 0}).astype(int).values
     
     # Extract the pre-engineered features for the pseudo-label subset
-    X_pseudo = X_test_full.loc[high_conf_mask].copy()
+    # Reset index to ensure it aligns with the 0-indexed high_conf_mask from the submission file
+    X_pseudo = X_test_full.reset_index(drop=True)[high_conf_mask.values].copy()
     y_pseudo = test_pseudo_y
     
     oof_preds = np.zeros(len(X_train_full))
