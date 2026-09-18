@@ -78,7 +78,7 @@ except ImportError:
         def Parameter(self, *args, **kwargs): return None
     nn = _MockNN()
 
-from features.grandmaster_features import build_grandmaster_features, TARGET
+from src.features import build_grandmaster_features, TARGET
 from kaggle.paths import resolve_data_dir, resolve_output_dir
 
 

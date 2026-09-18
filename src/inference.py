@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # We still need the feature engineering module to format incoming user data
-from features.grandmaster_features import build_grandmaster_features
+from src.features import build_grandmaster_features
 
 def init_model(model_path: str = "models/distilled_student.txt") -> lgb.Booster:
     """Loads the distilled model into memory once at server startup."""
