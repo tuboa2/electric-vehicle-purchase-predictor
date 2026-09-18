@@ -1,8 +1,0 @@
-{
-  "weekly_gpu_limit_hours": 28.0,
-  "used_weekly_gpu_hours": 0.0,
-  "session_timeout_hours": 10.5,
-  "current_session_hours": 0.0,
-  "daily_submissions_used": 0,
-  "daily_submission_limit": 5
-}
