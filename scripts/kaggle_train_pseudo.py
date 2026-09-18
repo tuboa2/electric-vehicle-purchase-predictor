@@ -42,6 +42,7 @@ def main():
     parser.add_argument("--pos_thresh", type=float, default=0.990, help="Threshold for positive pseudo-labels")
     parser.add_argument("--neg_thresh", type=float, default=0.008, help="Threshold for negative pseudo-labels")
     parser.add_argument("--pseudo_weight", type=float, default=0.60, help="Sample weight for pseudo-labels")
+    parser.add_argument("--sub_path", type=str, default="", help="Path to the champion submission file on Kaggle")
     args = parser.parse_args()
 
     data_dir = locate_data_dir()
@@ -51,11 +52,14 @@ def main():
     orig_path = data_dir / "EV_Adoption_and_Range_Anxiety_Dataset.csv"
     orig = pd.read_csv(orig_path) if orig_path.exists() else None
 
-    # Load submission (3).csv or fallback to top1 champion
-    sub_path = PROJECT_ROOT / "models" / "submission (3).csv"
-    if not sub_path.exists():
-        sub_path = PROJECT_ROOT / "models" / "submission_top1_champion.csv"
-        
+    if args.sub_path:
+        sub_path = Path(args.sub_path)
+    else:
+        # Load submission (3).csv or fallback to top1 champion
+        sub_path = PROJECT_ROOT / "models" / "submission (3).csv"
+        if not sub_path.exists():
+            sub_path = PROJECT_ROOT / "models" / "submission_top1_champion.csv"
+            
     if not sub_path.exists():
         print(f"[-] Could not find submission file for pseudo-labels at {sub_path}. Aborting.")
         sys.exit(1)
